@@ -146,7 +146,6 @@ async function callBitrixMethod(method, params = {}) {
 
 // ==================== ВЕБХУКИ БИТРИКС24 ====================
 
-// Основной URL вебхука
 app.post('/api/bitrix/webhook', async (req, res) => {
   try {
     console.log('📥 Webhook received:', new Date().toISOString());
@@ -168,7 +167,6 @@ app.post('/api/bitrix/webhook', async (req, res) => {
   }
 });
 
-// Альтернативный URL (для совместимости)
 app.post('/api/bitrix/call-webhook', async (req, res) => {
   try {
     console.log('📥 Call webhook received:', new Date().toISOString());
@@ -326,7 +324,7 @@ app.get('/api/bitrix/users', async (req, res) => {
   }
 });
 
-// ==================== ТРАНСКРИБАЦИЯ С ДВУХКАНАЛКОЙ ====================
+// ==================== ТРАНСКРИБАЦИЯ ====================
 
 async function transcribeAudioDualChannel(audioUrl) {
   try {
@@ -342,7 +340,7 @@ async function transcribeAudioDualChannel(audioUrl) {
     let plainText = '';
     let segments = [];
     
-    // Пробуем через Google Proxy (если OpenAI заблокирован)
+    // Пробуем через Google Proxy
     if (GOOGLE_PROXY_URL) {
       try {
         console.log('🎤 Sending to Whisper via Google Proxy...');
@@ -351,8 +349,7 @@ async function transcribeAudioDualChannel(audioUrl) {
         const proxyResponse = await axios.post(GOOGLE_PROXY_URL, {
           type: 'transcribe',
           apiKey: OPENAI_API_KEY,
-          audio: base64Audio,
-          language: 'ru'
+          audio: base64Audio
         }, { timeout: 180000 });
         
         if (proxyResponse.data.text) {
@@ -374,7 +371,6 @@ async function transcribeAudioDualChannel(audioUrl) {
       const formData = new FormData();
       formData.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
       formData.append('model', 'whisper-1');
-      formData.append('language', 'ru');
       formData.append('response_format', 'verbose_json');
       formData.append('timestamp_granularities[]', 'segment');
       
@@ -447,7 +443,8 @@ function detectRoleByContent(text) {
     'чем могу помочь', 'могу вам помочь', 'записать вас',
     'какой врач', 'к какому врачу', 'на какое время',
     'свободное время', 'удобное время', 'ваш телефон',
-    'перезвоним', 'подтвердим', 'напомним', 'ожидаем вас'
+    'перезвоним', 'подтвердим', 'напомним', 'ожидаем вас',
+    'miramed', 'мирамед'
   ];
   
   const clientPhrases = [
