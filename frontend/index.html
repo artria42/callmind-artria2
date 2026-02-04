@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Miramed CallMind — Аналитика звонков</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        *{font-family:'Inter',sans-serif}
+        .fade-in{animation:fadeIn .3s ease-out}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+        .nav-active{background:linear-gradient(to right,#0891b2,#06b6d4);color:#fff;box-shadow:0 10px 15px -3px rgba(8,145,178,.3)}
+        .nav-inactive{color:#94a3b8}
+        .nav-inactive:hover{background:rgba(51,65,85,.5);color:#fff}
+        .modal{display:none;position:fixed;inset:0;z-index:100;align-items:center;justify-content:center;background:rgba(0,0,0,.6);backdrop-filter:blur(4px)}
+        .modal.active{display:flex}
+        .filter-btn.active{background:#0891b2;color:#fff}
+        .filter-btn:not(.active){background:#f1f5f9;color:#64748b}
+        .clickable:hover{transform:translateY(-2px);box-shadow:0 10px 25px -5px rgba(0,0,0,.1)}
+        .transcript-manager{background:#dcfce7;border-left:4px solid #22c55e;margin-left:0;margin-right:20%}
+        .transcript-client{background:#dbeafe;border-left:4px solid #3b82f6;margin-left:20%;margin-right:0}
+        .expandable{max-height:0;overflow:hidden;transition:max-height 0.3s ease-out}
+        .expandable.open{max-height:1000px}
+        .expand-btn{cursor:pointer;user-select:none}
+        .expand-btn:hover{background:#f1f5f9}
+    </style>
+</head>
+<body class="bg-slate-50">
+
+<script>
+    // ⚠️ ВАЖНО: Замените на URL вашего Railway бэкенда
+    const API_URL = 'https://YOUR-BACKEND.up.railway.app';
+</script>
+
+<div class="flex min-h-screen">
+    <!-- Sidebar -->
+    <aside class="hidden lg:flex w-72 bg-gradient-to-b from-slate-900 via-slate-800 to-slate-900 text-white flex-col min-h-screen fixed h-full z-40">
+        <div class="p-6 border-b border-slate-700/50">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-gradient-to-br from-cyan-500 to-teal-600 rounded-xl flex items-center justify-center shadow-lg">
+                    <i data-lucide="stethoscope" class="w-6 h-6"></i>
+                </div>
+                <div>
+                    <h1 class="text-xl font-bold">Miramed</h1>
+                    <span class="text-xs text-cyan-400 font-medium">CallMind AI</span>
+                </div>
+            </div>
+        </div>
+        <nav class="flex-1 p-4 space-y-2">
+            <button onclick="showScreen('dashboard')" id="nav-dashboard" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl nav-active">
+                <i data-lucide="layout-dashboard" class="w-5 h-5"></i>
+                <span class="font-medium">Дашборд</span>
+            </button>
+            <button onclick="showScreen('calls')" id="nav-calls" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl nav-inactive">
+                <i data-lucide="phone-call" class="w-5 h-5"></i>
+                <span class="font-medium">Звонки</span>
+            </button>
+            <button onclick="showScreen('team')" id="nav-team" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl nav-inactive">
+                <i data-lucide="users" class="w-5 h-5"></i>
+                <span class="font-medium">Команда</span>
+            </button>
+            <button onclick="showScreen('whatsapp')" id="nav-whatsapp" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl nav-inactive opacity-50">
+                <i data-lucide="message-circle" class="w-5 h-5"></i>
+                <span class="font-medium">WhatsApp</span>
+                <span class="ml-auto text-xs bg-slate-700 px-2 py-0.5 rounded">скоро</span>
+            </button>
+        </nav>
+        <div class="p-4 border-t border-slate-700/50">
+            <div class="flex items-center gap-2 p-2 rounded-lg bg-cyan-500/20 border border-cyan-500/30">
+                <i data-lucide="zap" class="w-4 h-4 text-cyan-400"></i>
+                <span class="text-xs text-cyan-400 font-medium">AI Активен</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="flex-1 lg:ml-72 overflow-auto min-h-screen pb-20 lg:pb-0">
+        <!-- Mobile Header -->
+        <div class="lg:hidden sticky top-0 z-30 bg-white border-b border-slate-200 px-4 py-3">
+            <div class="flex items-center justify-center gap-2">
+                <div class="w-8 h-8 bg-gradient-to-br from-cyan-500 to-teal-600 rounded-lg flex items-center justify-center">
+                    <i data-lucide="stethoscope" class="w-5 h-5 text-white"></i>
+                </div>
+                <span class="font-bold text-slate-800">Miramed CallMind</span>
+            </div>
+        </div>
+
+        <!-- ==================== DASHBOARD ==================== -->
+        <div id="screen-dashboard" class="screen p-4 lg:p-8 space-y-6 fade-in">
+            <div class="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+                <div>
+                    <h1 class="text-2xl lg:text-3xl font-bold text-slate-800">Дашборд</h1>
+                    <p class="text-slate-500 mt-1">Аналитика звонков Miramed (Актобе)</p>
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+                <div class="flex flex-col lg:flex-row gap-4">
+                    <div class="flex-1">
+                        <label class="text-xs font-medium text-slate-500 mb-2 block">Администратор</label>
+                        <select id="filter-manager" onchange="applyFilters()" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700">
+                            <option value="all">Все администраторы</option>
+                        </select>
+                    </div>
+                    <div class="flex-1">
+                        <label class="text-xs font-medium text-slate-500 mb-2 block">Период</label>
+                        <select id="filter-period" onchange="setPeriod(this.value)" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700">
+                            <option value="today">Сегодня</option>
+                            <option value="yesterday">Вчера</option>
+                            <option value="current_week" selected>Текущая неделя</option>
+                            <option value="last_7_days">Последние 7 дней</option>
+                            <option value="current_month">Текущий месяц</option>
+                            <option value="last_30_days">Последние 30 дней</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Stats -->
+            <div class="grid grid-cols-2 lg:grid-cols-5 gap-4">
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                    <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-cyan-500 to-cyan-600 flex items-center justify-center text-white mb-3">
+                        <i data-lucide="phone-call" class="w-5 h-5"></i>
+                    </div>
+                    <p class="text-slate-500 text-xs font-medium">Всего звонков</p>
+                    <p class="text-2xl font-bold text-slate-800" id="stat-total-calls">—</p>
+                </div>
+
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                    <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-violet-500 to-violet-600 flex items-center justify-center text-white mb-3">
+                        <i data-lucide="brain" class="w-5 h-5"></i>
+                    </div>
+                    <p class="text-slate-500 text-xs font-medium">Проанализировано</p>
+                    <p class="text-2xl font-bold text-violet-600" id="stat-analyzed">—</p>
+                </div>
+
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100 cursor-pointer clickable" onclick="showScoreDetail()">
+                    <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center text-white mb-3">
+                        <i data-lucide="star" class="w-5 h-5"></i>
+                    </div>
+                    <p class="text-slate-500 text-xs font-medium">Средний балл</p>
+                    <p class="text-2xl font-bold text-emerald-600" id="stat-avg-score">—</p>
+                </div>
+
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                    <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-amber-500 to-amber-600 flex items-center justify-center text-white mb-3">
+                        <i data-lucide="calendar-check" class="w-5 h-5"></i>
+                    </div>
+                    <p class="text-slate-500 text-xs font-medium">Записи (80+)</p>
+                    <p class="text-2xl font-bold text-amber-600" id="stat-successful">—</p>
+                </div>
+
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                    <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-pink-500 to-pink-600 flex items-center justify-center text-white mb-3">
+                        <i data-lucide="clock" class="w-5 h-5"></i>
+                    </div>
+                    <p class="text-slate-500 text-xs font-medium">Ср. время звонка</p>
+                    <p class="text-2xl font-bold text-pink-600" id="stat-avg-duration">—</p>
+                </div>
+            </div>
+
+            <!-- Criteria Breakdown -->
+            <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                <div class="flex items-center gap-2 mb-4">
+                    <div class="w-8 h-8 bg-cyan-100 rounded-lg flex items-center justify-center">
+                        <i data-lucide="bar-chart-3" class="w-4 h-4 text-cyan-600"></i>
+                    </div>
+                    <h2 class="text-lg font-bold text-slate-800">Средние баллы по блокам</h2>
+                </div>
+                <div id="criteria-breakdown" class="grid grid-cols-2 lg:grid-cols-6 gap-4">
+                    <p class="text-center py-4 text-slate-400 col-span-full">Загрузка...</p>
+                </div>
+            </div>
+
+            <!-- Problem Calls & Recent -->
+            <div class="grid lg:grid-cols-2 gap-6">
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="flex items-center gap-2">
+                            <div class="w-8 h-8 bg-red-100 rounded-lg flex items-center justify-center">
+                                <i data-lucide="alert-triangle" class="w-4 h-4 text-red-600"></i>
+                            </div>
+                            <h2 class="text-lg font-bold text-slate-800">Проблемные звонки</h2>
+                        </div>
+                    </div>
+                    <div id="problem-calls" class="space-y-3">
+                        <p class="text-center py-4 text-slate-400 text-sm">Нет проблемных звонков</p>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                    <div class="flex items-center justify-between mb-4">
+                        <div class="flex items-center gap-2">
+                            <div class="w-8 h-8 bg-violet-100 rounded-lg flex items-center justify-center">
+                                <i data-lucide="sparkles" class="w-4 h-4 text-violet-600"></i>
+                            </div>
+                            <h2 class="text-lg font-bold text-slate-800">Последние анализы</h2>
+                        </div>
+                    </div>
+                    <div id="recent-analyzed" class="space-y-3">
+                        <p class="text-center py-4 text-slate-400 text-sm">Загрузка...</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== CALLS ==================== -->
+        <div id="screen-calls" class="screen p-4 lg:p-8 space-y-6 hidden fade-in">
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                <div>
+                    <h1 class="text-2xl font-bold text-slate-800">Звонки</h1>
+                    <p class="text-slate-500 text-sm">Все звонки с AI-анализом</p>
+                </div>
+                <button onclick="analyzeAllCalls()" id="btn-analyze-all" class="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-violet-500 to-purple-600 text-white rounded-xl font-medium hover:opacity-90 shadow-lg">
+                    <i data-lucide="sparkles" class="w-4 h-4"></i>
+                    <span>Анализировать все</span>
+                </button>
+            </div>
+
+            <!-- Calls Filter -->
+            <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-4">
+                <div class="flex flex-wrap items-center gap-4">
+                    <span class="text-sm font-medium text-slate-600">Администратор:</span>
+                    <select id="calls-filter-manager" onchange="renderFilteredCalls()" class="px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm">
+                        <option value="all">Все</option>
+                    </select>
+                </div>
+                <div class="flex flex-wrap gap-2">
+                    <button onclick="setCallsFilter('all')" id="filter-all" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium active">Все звонки</button>
+                    <button onclick="setCallsFilter('problem')" id="filter-problem" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium">Проблемные (&lt;60)</button>
+                    <button onclick="setCallsFilter('success')" id="filter-success" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium">Успешные (80+)</button>
+                    <button onclick="setCallsFilter('unanalyzed')" id="filter-unanalyzed" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium">Без анализа</button>
+                </div>
+            </div>
+
+            <!-- Calls Table -->
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-slate-50 border-b border-slate-100">
+                            <tr>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500">Администратор</th>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500">Пациент</th>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500">Дата</th>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500">Длит.</th>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500">Балл</th>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500">Статус</th>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500"></th>
+                            </tr>
+                        </thead>
+                        <tbody id="calls-table" class="divide-y divide-slate-100">
+                            <tr><td colspan="7" class="text-center py-8 text-slate-400">Загрузка...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== TEAM ==================== -->
+        <div id="screen-team" class="screen p-4 lg:p-8 space-y-6 hidden fade-in">
+            <div>
+                <h1 class="text-2xl font-bold text-slate-800">Рейтинг команды</h1>
+                <p class="text-slate-500 text-sm">Ранжирование администраторов по качеству</p>
+            </div>
+
+            <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                <div class="overflow-x-auto">
+                    <table class="w-full">
+                        <thead class="bg-slate-50 border-b border-slate-100">
+                            <tr>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500 w-16">#</th>
+                                <th class="text-left px-4 py-3 text-xs font-semibold text-slate-500">Администратор</th>
+                                <th class="text-center px-4 py-3 text-xs font-semibold text-slate-500">Звонков</th>
+                                <th class="text-center px-4 py-3 text-xs font-semibold text-slate-500">Проанализ.</th>
+                                <th class="text-center px-4 py-3 text-xs font-semibold text-slate-500">Средний балл</th>
+                                <th class="text-center px-4 py-3 text-xs font-semibold text-slate-500">Успешных</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ranking-table" class="divide-y divide-slate-100">
+                            <tr><td colspan="6" class="text-center py-8 text-slate-400">Загрузка...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ==================== WHATSAPP (ЗАГЛУШКА) ==================== -->
+        <div id="screen-whatsapp" class="screen p-4 lg:p-8 space-y-6 hidden fade-in">
+            <div class="text-center py-16">
+                <div class="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <i data-lucide="message-circle" class="w-10 h-10 text-slate-400"></i>
+                </div>
+                <h2 class="text-xl font-bold text-slate-800 mb-2">WhatsApp аналитика</h2>
+                <p class="text-slate-500">Интеграция в разработке</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Mobile Navigation -->
+    <nav class="lg:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 z-30">
+        <div class="flex justify-around py-2">
+            <button onclick="showScreen('dashboard')" class="mob-nav flex flex-col items-center gap-1 px-2 py-2 text-cyan-600" data-screen="dashboard">
+                <i data-lucide="layout-dashboard" class="w-5 h-5"></i>
+                <span class="text-xs">Дашборд</span>
+            </button>
+            <button onclick="showScreen('calls')" class="mob-nav flex flex-col items-center gap-1 px-2 py-2 text-slate-400" data-screen="calls">
+                <i data-lucide="phone-call" class="w-5 h-5"></i>
+                <span class="text-xs">Звонки</span>
+            </button>
+            <button onclick="showScreen('team')" class="mob-nav flex flex-col items-center gap-1 px-2 py-2 text-slate-400" data-screen="team">
+                <i data-lucide="trophy" class="w-5 h-5"></i>
+                <span class="text-xs">Команда</span>
+            </button>
+        </div>
+    </nav>
+</div>
+
+<!-- Call Detail Modal -->
+<div id="call-modal" class="modal" onclick="if(event.target===this)closeModal()">
+    <div class="bg-white rounded-2xl max-w-4xl w-full mx-4 max-h-[90vh] overflow-hidden flex flex-col">
+        <div class="p-5 border-b border-slate-100 flex items-center justify-between flex-shrink-0">
+            <div class="flex items-center gap-3">
+                <div class="w-10 h-10 bg-cyan-100 rounded-xl flex items-center justify-center">
+                    <i data-lucide="phone-call" class="w-5 h-5 text-cyan-600"></i>
+                </div>
+                <div>
+                    <h2 class="text-lg font-bold text-slate-800" id="modal-title">Анализ звонка</h2>
+                    <p class="text-sm text-slate-500" id="modal-subtitle"></p>
+                </div>
+            </div>
+            <button onclick="closeModal()" class="p-2 hover:bg-slate-100 rounded-lg">
+                <i data-lucide="x" class="w-5 h-5 text-slate-500"></i>
+            </button>
+        </div>
+        <div id="call-modal-content" class="p-5 overflow-y-auto flex-1"></div>
+    </div>
+</div>
+
+<script>
+lucide.createIcons();
+
+let allCalls = [];
+let allManagers = [];
+let currentPeriod = 'current_week';
+let currentManager = 'all';
+let currentCallsFilter = 'all';
+
+// ==================== FILTERS ====================
+
+function setPeriod(period) {
+    currentPeriod = period;
+    applyFilters();
+}
+
+function getDateRange(period) {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let startDate, endDate;
+    
+    switch(period) {
+        case 'today':
+            startDate = today;
+            endDate = new Date(today.getTime() + 24*60*60*1000 - 1);
+            break;
+        case 'yesterday':
+            startDate = new Date(today.getTime() - 24*60*60*1000);
+            endDate = new Date(today.getTime() - 1);
+            break;
+        case 'current_week':
+            const dayOfWeek = today.getDay();
+            const monday = new Date(today);
+            monday.setDate(today.getDate() - (dayOfWeek === 0 ? 6 : dayOfWeek - 1));
+            startDate = monday;
+            endDate = now;
+            break;
+        case 'last_7_days':
+            startDate = new Date(today.getTime() - 7*24*60*60*1000);
+            endDate = now;
+            break;
+        case 'current_month':
+            startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+            endDate = now;
+            break;
+        case 'last_30_days':
+            startDate = new Date(today.getTime() - 30*24*60*60*1000);
+            endDate = now;
+            break;
+        default:
+            return null;
+    }
+    return { startDate, endDate };
+}
+
+function getFilteredCalls() {
+    let filtered = [...allCalls];
+    
+    if (currentManager !== 'all') {
+        filtered = filtered.filter(c => c.manager_id === parseInt(currentManager));
+    }
+    
+    const range = getDateRange(currentPeriod);
+    if (range) {
+        filtered = filtered.filter(c => {
+            const callDate = new Date(c.call_date);
+            return callDate >= range.startDate && callDate <= range.endDate;
+        });
+    }
+    
+    return filtered;
+}
+
+function applyFilters() {
+    currentManager = document.getElementById('filter-manager').value;
+    renderDashboard();
+}
+
+// ==================== API ====================
+
+async function loadCalls() {
+    try {
+        const res = await fetch(`${API_URL}/api/calls`);
+        allCalls = await res.json();
+        renderFilteredCalls();
+        renderDashboard();
+    } catch (e) {
+        console.error('Error loading calls:', e);
+    }
+}
+
+async function loadManagers() {
+    try {
+        const res = await fetch(`${API_URL}/api/managers`);
+        allManagers = await res.json();
+        
+        const select = document.getElementById('filter-manager');
+        const callsSelect = document.getElementById('calls-filter-manager');
+        
+        const options = '<option value="all">Все администраторы</option>' + 
+            allManagers.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+        
+        select.innerHTML = options;
+        if (callsSelect) callsSelect.innerHTML = options;
+        
+        renderTeam();
+    } catch (e) {
+        console.error('Error loading managers:', e);
+    }
+}
+
+async function analyzeCall(callId) {
+    const btn = document.querySelector(`[data-call-id="${callId}"]`);
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i data-lucide="loader" class="w-4 h-4 animate-spin"></i>';
+        lucide.createIcons();
+    }
+    
+    try {
+        const res = await fetch(`${API_URL}/api/analyze/${callId}`, { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.success) {
+            await new Promise(r => setTimeout(r, 1000));
+            await loadCalls();
+            await showCallDetail(callId);
+            return true;
+        } else {
+            alert('Ошибка: ' + (data.error || 'Неизвестная ошибка'));
+            return false;
+        }
+    } catch (e) {
+        alert('Ошибка сети: ' + e.message);
+        return false;
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i data-lucide="sparkles" class="w-4 h-4"></i>';
+            lucide.createIcons();
+        }
+    }
+}
+
+async function analyzeAllCalls() {
+    const btn = document.getElementById('btn-analyze-all');
+    btn.disabled = true;
+    btn.innerHTML = '<i data-lucide="loader" class="w-4 h-4 animate-spin"></i> Анализ...';
+    
+    const unanalyzed = allCalls.filter(c => c.audio_url && !c.scores);
+    
+    if (!unanalyzed.length) {
+        alert('Все звонки уже проанализированы!');
+        btn.disabled = false;
+        btn.innerHTML = '<i data-lucide="sparkles" class="w-4 h-4"></i> Анализировать все';
+        lucide.createIcons();
+        return;
+    }
+    
+    for (const call of unanalyzed) {
+        await analyzeCall(call.id);
+        await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    btn.disabled = false;
+    btn.innerHTML = '<i data-lucide="sparkles" class="w-4 h-4"></i> Анализировать все';
+    lucide.createIcons();
+}
+
+// ==================== RENDER ====================
+
+function renderDashboard() {
+    const calls = getFilteredCalls();
+    const analyzed = calls.filter(c => c.scores);
+    
+    document.getElementById('stat-total-calls').textContent = calls.length;
+    document.getElementById('stat-analyzed').textContent = analyzed.length;
+    
+    const avgScore = analyzed.length 
+        ? Math.round(analyzed.reduce((s, c) => s + (c.scores?.total_score || 0), 0) / analyzed.length)
+        : 0;
+    document.getElementById('stat-avg-score').textContent = avgScore ? `${avgScore}/100` : '—';
+    
+    const successful = analyzed.filter(c => c.scores?.total_score >= 80).length;
+    document.getElementById('stat-successful').textContent = successful;
+    
+    const callsWithDuration = calls.filter(c => c.duration > 0);
+    if (callsWithDuration.length) {
+        const avgDuration = Math.round(callsWithDuration.reduce((s, c) => s + c.duration, 0) / callsWithDuration.length);
+        const min = Math.floor(avgDuration / 60);
+        const sec = avgDuration % 60;
+        document.getElementById('stat-avg-duration').textContent = `${min}:${sec.toString().padStart(2, '0')}`;
+    } else {
+        document.getElementById('stat-avg-duration').textContent = '—';
+    }
+    
+    renderCriteriaBreakdown(analyzed);
+    renderProblemCalls(analyzed.filter(c => c.scores?.total_score < 60));
+    renderRecentAnalyzed(analyzed.slice(0, 5));
+}
+
+function renderCriteriaBreakdown(analyzed) {
+    const container = document.getElementById('criteria-breakdown');
+    
+    if (!analyzed.length) {
+        container.innerHTML = '<p class="text-center py-4 text-slate-400 col-span-full text-sm">Нет данных</p>';
+        return;
+    }
+    
+    const blocks = [
+        { key: 'block1_score', name: 'Контакт' },
+        { key: 'block2_score', name: 'Боль' },
+        { key: 'block3_score', name: 'Презентация' },
+        { key: 'block4_score', name: 'Запись' },
+        { key: 'block5_score', name: 'Возражения' },
+        { key: 'block6_score', name: 'Финал' }
+    ];
+    
+    container.innerHTML = blocks.map(bl => {
+        const validCalls = analyzed.filter(c => c.scores?.[bl.key] != null);
+        const avg = validCalls.length ? Math.round(validCalls.reduce((s, c) => s + (c.scores?.[bl.key] || 0), 0) / validCalls.length) : 0;
+        const colorClass = avg >= 80 ? 'text-emerald-600' : avg >= 60 ? 'text-amber-600' : 'text-red-600';
+        const bgClass = avg >= 80 ? 'bg-emerald-500' : avg >= 60 ? 'bg-amber-500' : 'bg-red-500';
+        
+        return `
+            <div class="bg-slate-50 rounded-xl p-3 text-center">
+                <p class="text-xs text-slate-500 mb-1">${bl.name}</p>
+                <p class="text-2xl font-bold ${colorClass}">${avg}</p>
+                <div class="mt-2 bg-slate-200 rounded-full h-1.5">
+                    <div class="${bgClass} h-1.5 rounded-full" style="width:${avg}%"></div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderProblemCalls(calls) {
+    const container = document.getElementById('problem-calls');
+    
+    if (!calls.length) {
+        container.innerHTML = '<p class="text-center py-4 text-emerald-600 text-sm">Нет проблемных звонков!</p>';
+        return;
+    }
+    
+    container.innerHTML = calls.slice(0, 5).map(call => `
+        <div onclick="showCallDetail(${call.id})" class="flex items-center gap-3 p-3 rounded-xl bg-red-50 cursor-pointer hover:bg-red-100">
+            <div class="w-12 h-12 rounded-xl bg-red-500 flex items-center justify-center text-white font-bold">${call.scores?.total_score || 0}</div>
+            <div class="flex-1 min-w-0">
+                <p class="font-medium text-slate-800 text-sm">${call.manager?.name || 'Администратор'}</p>
+                <p class="text-xs text-red-600 truncate">${call.scores?.ai_summary || ''}</p>
+            </div>
+        </div>
+    `).join('');
+}
+
+function renderRecentAnalyzed(calls) {
+    const container = document.getElementById('recent-analyzed');
+    
+    if (!calls.length) {
+        container.innerHTML = '<p class="text-center py-4 text-slate-400 text-sm">Нет проанализированных звонков</p>';
+        return;
+    }
+    
+    container.innerHTML = calls.map(call => {
+        const score = call.scores?.total_score || 0;
+        const gradient = score >= 80 ? 'from-emerald-500 to-emerald-600' : score >= 60 ? 'from-amber-500 to-amber-600' : 'from-red-500 to-red-600';
+        
+        return `
+            <div onclick="showCallDetail(${call.id})" class="flex items-center gap-3 p-3 rounded-xl hover:bg-slate-50 cursor-pointer">
+                <div class="w-12 h-12 rounded-xl bg-gradient-to-br ${gradient} flex items-center justify-center text-white font-bold">${score}</div>
+                <div class="flex-1 min-w-0">
+                    <p class="font-medium text-slate-800 text-sm">${call.manager?.name || 'Администратор'}</p>
+                    <p class="text-xs text-slate-500 truncate">${call.scores?.ai_summary || ''}</p>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+// ==================== CALLS TABLE ====================
+
+function setCallsFilter(filter) {
+    currentCallsFilter = filter;
+    document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+    document.getElementById(`filter-${filter}`).classList.add('active');
+    renderFilteredCalls();
+}
+
+function renderFilteredCalls() {
+    let filtered = [...allCalls];
+    
+    const selectedManager = document.getElementById('calls-filter-manager')?.value || 'all';
+    if (selectedManager !== 'all') {
+        filtered = filtered.filter(c => c.manager_id === parseInt(selectedManager));
+    }
+    
+    if (currentCallsFilter === 'problem') {
+        filtered = filtered.filter(c => c.scores && c.scores.total_score < 60);
+    } else if (currentCallsFilter === 'success') {
+        filtered = filtered.filter(c => c.scores && c.scores.total_score >= 80);
+    } else if (currentCallsFilter === 'unanalyzed') {
+        filtered = filtered.filter(c => !c.scores && c.audio_url);
+    }
+    
+    renderCallsTable(filtered);
+}
+
+function renderCallsTable(calls) {
+    const tbody = document.getElementById('calls-table');
+    
+    if (!calls.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="text-center py-8 text-slate-400">Нет звонков</td></tr>';
+        return;
+    }
+    
+    tbody.innerHTML = calls.map(call => {
+        const score = call.scores?.total_score;
+        const hasAudio = !!call.audio_url;
+        const isAnalyzed = score !== undefined;
+        
+        const scoreColor = score >= 80 ? 'text-emerald-600 bg-emerald-50' : 
+                          score >= 60 ? 'text-amber-600 bg-amber-50' : 
+                          score ? 'text-red-600 bg-red-50' : 'text-slate-400 bg-slate-50';
+        
+        const statusBadge = isAnalyzed 
+            ? `<span class="px-2 py-1 rounded-full text-xs font-medium ${score >= 80 ? 'bg-emerald-100 text-emerald-700' : score >= 60 ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700'}">${score >= 80 ? 'Успешный' : score >= 60 ? 'Средний' : 'Проблемный'}</span>`
+            : hasAudio 
+                ? '<span class="px-2 py-1 rounded-full text-xs font-medium bg-violet-100 text-violet-700">Ожидает</span>'
+                : '<span class="px-2 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-500">Нет записи</span>';
+        
+        const duration = call.duration ? `${Math.floor(call.duration / 60)}:${(call.duration % 60).toString().padStart(2, '0')}` : '—';
+        const date = call.call_date ? new Date(call.call_date).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
+        
+        return `
+            <tr class="hover:bg-slate-50 cursor-pointer" onclick="event.target.closest('button') || ${isAnalyzed ? `showCallDetail(${call.id})` : hasAudio ? `analyzeCall(${call.id})` : 'null'}">
+                <td class="px-4 py-3"><p class="font-medium text-slate-800 text-sm">${call.manager?.name || '—'}</p></td>
+                <td class="px-4 py-3"><p class="text-slate-600 text-sm">${call.client_name || '—'}</p></td>
+                <td class="px-4 py-3"><p class="text-slate-500 text-xs">${date}</p></td>
+                <td class="px-4 py-3"><p class="text-slate-600 text-sm">${duration}</p></td>
+                <td class="px-4 py-3"><span class="px-2.5 py-1 rounded-lg text-sm font-bold ${scoreColor}">${score ?? '—'}</span></td>
+                <td class="px-4 py-3">${statusBadge}</td>
+                <td class="px-4 py-3">
+                    ${isAnalyzed 
+                        ? `<button onclick="showCallDetail(${call.id})" class="p-2 hover:bg-cyan-50 rounded-lg text-cyan-600"><i data-lucide="eye" class="w-4 h-4"></i></button>`
+                        : hasAudio 
+                            ? `<button onclick="analyzeCall(${call.id})" data-call-id="${call.id}" class="p-2 hover:bg-violet-50 rounded-lg text-violet-600"><i data-lucide="sparkles" class="w-4 h-4"></i></button>`
+                            : ''}
+                </td>
+            </tr>
+        `;
+    }).join('');
+    
+    lucide.createIcons();
+}
+
+// ==================== TEAM ====================
+
+function renderTeam() {
+    const tbody = document.getElementById('ranking-table');
+    
+    const stats = allManagers.map(m => {
+        const calls = allCalls.filter(c => c.manager_id === m.id);
+        const analyzed = calls.filter(c => c.scores);
+        const avgScore = analyzed.length ? Math.round(analyzed.reduce((s, c) => s + (c.scores?.total_score || 0), 0) / analyzed.length) : null;
+        const successful = analyzed.filter(c => c.scores?.total_score >= 80).length;
+        return { ...m, totalCalls: calls.length, analyzedCalls: analyzed.length, avgScore, successful };
+    }).sort((a, b) => (b.avgScore || 0) - (a.avgScore || 0));
+    
+    const medals = ['🥇', '🥈', '🥉'];
+    
+    tbody.innerHTML = stats.map((m, i) => {
+        const medal = m.avgScore && i < 3 ? medals[i] : '';
+        const scoreColor = m.avgScore >= 80 ? 'text-emerald-600' : m.avgScore >= 60 ? 'text-amber-600' : m.avgScore ? 'text-red-600' : 'text-slate-400';
+        
+        return `
+            <tr class="hover:bg-slate-50">
+                <td class="px-4 py-4"><span class="text-lg font-bold text-slate-400">${medal || (i + 1)}</span></td>
+                <td class="px-4 py-4">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-400 to-cyan-600 flex items-center justify-center text-white font-bold text-sm">
+                            ${m.name.split(' ').map(n => n[0]).join('').slice(0, 2)}
+                        </div>
+                        <p class="font-medium text-slate-800">${m.name}</p>
+                    </div>
+                </td>
+                <td class="px-4 py-4 text-center text-slate-600">${m.totalCalls}</td>
+                <td class="px-4 py-4 text-center text-slate-600">${m.analyzedCalls}</td>
+                <td class="px-4 py-4 text-center"><span class="text-xl font-bold ${scoreColor}">${m.avgScore ?? '—'}</span></td>
+                <td class="px-4 py-4 text-center text-emerald-600 font-medium">${m.successful}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+// ==================== CALL DETAIL MODAL ====================
+
+async function showCallDetail(callId) {
+    const modal = document.getElementById('call-modal');
+    const content = document.getElementById('call-modal-content');
+    
+    content.innerHTML = '<div class="flex justify-center py-12"><i data-lucide="loader" class="w-8 h-8 text-cyan-600 animate-spin"></i></div>';
+    lucide.createIcons();
+    modal.classList.add('active');
+    
+    try {
+        const res = await fetch(`${API_URL}/api/calls/${callId}`);
+        const call = await res.json();
+        const score = call.scores;
+        
+        document.getElementById('modal-title').textContent = call.manager?.name || 'Звонок #' + callId;
+        document.getElementById('modal-subtitle').textContent = call.client_name || '';
+        
+        const gradient = score?.total_score >= 80 ? 'from-emerald-400 to-emerald-600' : 
+                        score?.total_score >= 60 ? 'from-amber-400 to-amber-600' : 'from-red-400 to-red-600';
+        
+        // Информация о клиенте
+        const clientInfo = score?.client_info || {};
+        const clientInfoHtml = score ? `
+            <div class="bg-blue-50 rounded-xl p-5">
+                <div class="flex items-center gap-2 mb-4">
+                    <i data-lucide="user" class="w-5 h-5 text-blue-600"></i>
+                    <h3 class="font-semibold text-blue-800">Информация о пациенте</h3>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div class="bg-white rounded-lg p-3">
+                        <p class="text-xs text-slate-500 mb-1">📋 Факты</p>
+                        <ul class="text-sm text-slate-700 space-y-1">
+                            ${(clientInfo.facts || []).map(f => `<li>• ${f}</li>`).join('') || '<li class="text-slate-400">Не выявлено</li>'}
+                        </ul>
+                    </div>
+                    <div class="bg-white rounded-lg p-3">
+                        <p class="text-xs text-slate-500 mb-1">🎯 Потребности</p>
+                        <ul class="text-sm text-slate-700 space-y-1">
+                            ${(clientInfo.needs || []).map(n => `<li>• ${n}</li>`).join('') || '<li class="text-slate-400">Не выявлено</li>'}
+                        </ul>
+                    </div>
+                    <div class="bg-white rounded-lg p-3">
+                        <p class="text-xs text-slate-500 mb-1">😟 Боли</p>
+                        <ul class="text-sm text-slate-700 space-y-1">
+                            ${(clientInfo.pains || []).map(p => `<li>• ${p}</li>`).join('') || '<li class="text-slate-400">Не выявлено</li>'}
+                        </ul>
+                    </div>
+                    <div class="bg-white rounded-lg p-3">
+                        <p class="text-xs text-slate-500 mb-1">🤔 Возражения</p>
+                        <ul class="text-sm text-slate-700 space-y-1">
+                            ${(clientInfo.objections || []).map(o => `<li>• ${o}</li>`).join('') || '<li class="text-slate-400">Не было</li>'}
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        ` : '';
+        
+        // Блоки с объяснениями
+        const explanations = score?.score_explanations || {};
+        const blocksHtml = score ? `
+            <div class="bg-slate-50 rounded-xl p-5">
+                <h3 class="font-semibold text-slate-800 mb-4">Оценка по блокам</h3>
+                <div class="space-y-3">
+                    ${renderBlockWithExplanation('Установление контакта', score.block1_score, explanations.block1, 1)}
+                    ${renderBlockWithExplanation('Выявление боли', score.block2_score, explanations.block2, 2)}
+                    ${renderBlockWithExplanation('Презентация решения', score.block3_score, explanations.block3, 3)}
+                    ${renderBlockWithExplanation('Запись', score.block4_score, explanations.block4, 4)}
+                    ${renderBlockWithExplanation('Отработка возражений', score.block5_score, explanations.block5, 5)}
+                    ${renderBlockWithExplanation('Финализация', score.block6_score, explanations.block6, 6)}
+                </div>
+            </div>
+        ` : '';
+        
+        // Транскрипт с ролями
+        const transcriptFormatted = call.transcript_formatted || [];
+        const transcriptHtml = transcriptFormatted.length > 0 ? `
+            <div class="bg-slate-50 rounded-xl p-5">
+                <div class="flex items-center gap-2 mb-3">
+                    <i data-lucide="message-square" class="w-5 h-5 text-slate-600"></i>
+                    <h3 class="font-semibold text-slate-800">Диалог</h3>
+                </div>
+                <div class="space-y-2 max-h-80 overflow-y-auto">
+                    ${transcriptFormatted.map(r => `
+                        <div class="p-3 rounded-lg ${r.role === 'manager' ? 'transcript-manager' : 'transcript-client'}">
+                            <p class="text-xs font-medium ${r.role === 'manager' ? 'text-green-700' : 'text-blue-700'} mb-1">
+                                ${r.role === 'manager' ? '👨‍💼 Администратор' : '👤 Пациент'}
+                            </p>
+                            <p class="text-sm text-slate-700">${r.text}</p>
+                        </div>
+                    `).join('')}
+                </div>
+            </div>
+        ` : call.transcript ? `
+            <div class="bg-slate-50 rounded-xl p-5">
+                <div class="flex items-center gap-2 mb-3">
+                    <i data-lucide="file-text" class="w-5 h-5 text-slate-600"></i>
+                    <h3 class="font-semibold text-slate-800">Транскрипт</h3>
+                </div>
+                <div class="bg-white rounded-lg p-4 max-h-64 overflow-y-auto border">
+                    <p class="text-sm text-slate-600 whitespace-pre-wrap">${call.transcript}</p>
+                </div>
+            </div>
+        ` : '';
+        
+        content.innerHTML = `
+            <div class="space-y-6">
+                ${score ? `
+                    <div class="bg-gradient-to-r ${gradient} rounded-2xl p-6 text-white text-center">
+                        <div class="text-5xl font-bold mb-2">${score.total_score}</div>
+                        <p class="text-white/80">${score.is_successful ? 'Пациент записан' : 'Запись не состоялась'}</p>
+                        <p class="text-white/60 text-sm mt-1">${score.call_type || ''}</p>
+                    </div>
+                    
+                    ${clientInfoHtml}
+                    
+                    ${blocksHtml}
+                    
+                    <div class="bg-violet-50 rounded-xl p-5">
+                        <div class="flex items-center gap-2 mb-2">
+                            <i data-lucide="sparkles" class="w-5 h-5 text-violet-600"></i>
+                            <h3 class="font-semibold text-violet-800">Вывод ИИ</h3>
+                        </div>
+                        <p class="text-violet-700">${score.ai_summary || 'Нет данных'}</p>
+                    </div>
+                ` : `
+                    <div class="text-center py-4">
+                        <p class="text-slate-500 mb-4">Звонок не проанализирован</p>
+                        ${call.audio_url ? `
+                            <button onclick="analyzeCall(${call.id})" data-call-id="${call.id}" class="px-6 py-3 bg-violet-600 text-white rounded-xl font-medium hover:bg-violet-700">
+                                <i data-lucide="sparkles" class="w-4 h-4 inline mr-2"></i>Анализировать
+                            </button>
+                        ` : '<p class="text-sm text-slate-400">Нет записи звонка</p>'}
+                    </div>
+                `}
+                
+                ${transcriptHtml}
+                
+                ${call.audio_url ? `
+                    <div class="bg-slate-50 rounded-xl p-5">
+                        <div class="flex items-center gap-2 mb-3">
+                            <i data-lucide="headphones" class="w-5 h-5 text-slate-600"></i>
+                            <h3 class="font-semibold text-slate-800">Запись звонка</h3>
+                        </div>
+                        <audio controls class="w-full" src="${call.audio_url}"></audio>
+                    </div>
+                ` : ''}
+                
+                ${call.crm_link ? `
+                    <a href="${call.crm_link}" target="_blank" class="flex items-center justify-center gap-2 w-full py-3 bg-cyan-600 text-white rounded-xl font-medium hover:bg-cyan-700">
+                        <i data-lucide="external-link" class="w-4 h-4"></i>Открыть в Битрикс24
+                    </a>
+                ` : ''}
+            </div>
+        `;
+        
+        lucide.createIcons();
+    } catch (e) {
+        content.innerHTML = `<p class="text-center py-8 text-red-500">Ошибка: ${e.message}</p>`;
+    }
+}
+
+function renderBlockWithExplanation(name, score, explanation, blockNum) {
+    if (score == null) return '';
+    
+    const scoreColor = score >= 80 ? 'text-emerald-600' : score >= 60 ? 'text-amber-600' : 'text-red-600';
+    const barColor = score >= 80 ? 'bg-emerald-500' : score >= 60 ? 'bg-amber-500' : 'bg-red-500';
+    
+    return `
+        <div class="bg-white rounded-lg p-4">
+            <div class="expand-btn flex justify-between items-center" onclick="toggleExplanation(${blockNum})">
+                <span class="text-sm font-medium text-slate-700">${name}</span>
+                <div class="flex items-center gap-2">
+                    <span class="text-sm font-bold ${scoreColor}">${score}/100</span>
+                    <i data-lucide="chevron-down" class="w-4 h-4 text-slate-400 transition-transform" id="chevron-${blockNum}"></i>
+                </div>
+            </div>
+            <div class="mt-2 bg-slate-100 rounded-full h-2">
+                <div class="${barColor} h-2 rounded-full" style="width:${score}%"></div>
+            </div>
+            <div class="expandable mt-3" id="explanation-${blockNum}">
+                <p class="text-sm text-slate-600 bg-slate-50 p-3 rounded-lg">${explanation || 'Нет объяснения'}</p>
+            </div>
+        </div>
+    `;
+}
+
+function toggleExplanation(blockNum) {
+    const el = document.getElementById(`explanation-${blockNum}`);
+    const chevron = document.getElementById(`chevron-${blockNum}`);
+    el.classList.toggle('open');
+    chevron.style.transform = el.classList.contains('open') ? 'rotate(180deg)' : '';
+}
+
+function closeModal() {
+    document.getElementById('call-modal').classList.remove('active');
+}
+
+function showScoreDetail() {
+    // Можно добавить модалку с детальной статистикой
+    alert('Функция в разработке');
+}
+
+// ==================== NAVIGATION ====================
+
+function showScreen(id) {
+    document.querySelectorAll('.screen').forEach(s => s.classList.add('hidden'));
+    document.getElementById('screen-' + id).classList.remove('hidden');
+    
+    document.querySelectorAll('.nav-btn').forEach(b => {
+        b.classList.remove('nav-active');
+        b.classList.add('nav-inactive');
+    });
+    document.getElementById('nav-' + id)?.classList.remove('nav-inactive');
+    document.getElementById('nav-' + id)?.classList.add('nav-active');
+    
+    document.querySelectorAll('.mob-nav').forEach(b => {
+        b.classList.remove('text-cyan-600');
+        b.classList.add('text-slate-400');
+    });
+    document.querySelector(`.mob-nav[data-screen="${id}"]`)?.classList.remove('text-slate-400');
+    document.querySelector(`.mob-nav[data-screen="${id}"]`)?.classList.add('text-cyan-600');
+    
+    lucide.createIcons();
+    window.scrollTo(0, 0);
+}
+
+// ==================== INIT ====================
+
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadCalls();
+    await loadManagers();
+});
+</script>
+
+</body>
+</html>
