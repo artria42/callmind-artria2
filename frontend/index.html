@@ -44,7 +44,7 @@
                 </div>
                 <div>
                     <h1 class="text-xl font-bold">Miramed</h1>
-                    <span class="text-xs text-cyan-400 font-medium">CallMind AI</span>
+                    <span class="text-xs text-cyan-400 font-medium">CallMind AI v2</span>
                 </div>
             </div>
         </div>
@@ -70,7 +70,7 @@
         <div class="p-4 border-t border-slate-700/50">
             <div class="flex items-center gap-2 p-2 rounded-lg bg-cyan-500/20 border border-cyan-500/30">
                 <i data-lucide="zap" class="w-4 h-4 text-cyan-400"></i>
-                <span class="text-xs text-cyan-400 font-medium">AI Активен</span>
+                <span class="text-xs text-cyan-400 font-medium">AI v2 Активен</span>
             </div>
         </div>
     </aside>
@@ -287,7 +287,7 @@
             </div>
         </div>
 
-        <!-- ==================== WHATSAPP (ЗАГЛУШКА) ==================== -->
+        <!-- ==================== WHATSAPP ==================== -->
         <div id="screen-whatsapp" class="screen p-4 lg:p-8 space-y-6 hidden fade-in">
             <div class="text-center py-16">
                 <div class="w-20 h-20 bg-slate-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -478,6 +478,36 @@ async function analyzeCall(callId) {
         if (btn) {
             btn.disabled = false;
             btn.innerHTML = '<i data-lucide="sparkles" class="w-4 h-4"></i>';
+            lucide.createIcons();
+        }
+    }
+}
+
+async function reanalyzeCall(callId) {
+    const btn = document.getElementById('btn-reanalyze');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i data-lucide="loader" class="w-4 h-4 animate-spin inline mr-2"></i>Переанализ...';
+        lucide.createIcons();
+    }
+    
+    try {
+        const res = await fetch(`${API_URL}/api/reanalyze/${callId}`, { method: 'POST' });
+        const data = await res.json();
+        
+        if (data.success) {
+            await new Promise(r => setTimeout(r, 500));
+            await loadCalls();
+            await showCallDetail(callId);
+        } else {
+            alert('Ошибка: ' + (data.error || 'Неизвестная ошибка'));
+        }
+    } catch (e) {
+        alert('Ошибка сети: ' + e.message);
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<i data-lucide="refresh-cw" class="w-4 h-4 inline mr-2"></i>Переанализировать';
             lucide.createIcons();
         }
     }
@@ -838,6 +868,14 @@ async function showCallDetail(callId) {
             </div>
         ` : '';
         
+        // Кнопка переанализа
+        const reanalyzeBtn = call.audio_url ? `
+            <button id="btn-reanalyze" onclick="reanalyzeCall(${call.id})" 
+                class="flex items-center justify-center gap-2 w-full py-3 bg-amber-50 text-amber-700 border border-amber-200 rounded-xl font-medium hover:bg-amber-100 transition-colors">
+                <i data-lucide="refresh-cw" class="w-4 h-4"></i>Переанализировать
+            </button>
+        ` : '';
+        
         content.innerHTML = `
             <div class="space-y-6">
                 ${score ? `
@@ -881,11 +919,14 @@ async function showCallDetail(callId) {
                     </div>
                 ` : ''}
                 
-                ${call.crm_link ? `
-                    <a href="${call.crm_link}" target="_blank" class="flex items-center justify-center gap-2 w-full py-3 bg-cyan-600 text-white rounded-xl font-medium hover:bg-cyan-700">
-                        <i data-lucide="external-link" class="w-4 h-4"></i>Открыть в Битрикс24
-                    </a>
-                ` : ''}
+                <div class="flex flex-col gap-3">
+                    ${reanalyzeBtn}
+                    ${call.crm_link ? `
+                        <a href="${call.crm_link}" target="_blank" class="flex items-center justify-center gap-2 w-full py-3 bg-cyan-600 text-white rounded-xl font-medium hover:bg-cyan-700">
+                            <i data-lucide="external-link" class="w-4 h-4"></i>Открыть в Битрикс24
+                        </a>
+                    ` : ''}
+                </div>
             </div>
         `;
         
@@ -932,7 +973,6 @@ function closeModal() {
 }
 
 function showScoreDetail() {
-    // Можно добавить модалку с детальной статистикой
     alert('Функция в разработке');
 }
 
