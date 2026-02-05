@@ -523,51 +523,60 @@ ${segmentedText}`;
   return formatted;
 }
 
-/**
- * ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ
- */
-async function transcribeAudio(audioUrl) {
-  console.log('📥 Downloading audio...');
-  const audioResponse = await axios.get(audioUrl, {
-    responseType: 'arraybuffer', timeout: 120000,
-    headers: { 'User-Agent': 'Mozilla/5.0' }
-  });
-  const audioBuffer = Buffer.from(audioResponse.data);
-  console.log(`📦 Audio: ${audioBuffer.length} bytes`);
 
 /**
  * ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ
  * ОТКЛЮЧЁН СТЕРЕО-РЕЖИМ - не работает из-за crosstalk
  */
 async function transcribeAudio(audioUrl) {
-  console.log("📥 Downloading audio...");
-  const audioResponse = await axios.get(audioUrl, {
-    responseType: "arraybuffer", timeout: 120000,
-    headers: { "User-Agent": "Mozilla/5.0" }
-  });
-  const audioBuffer = Buffer.from(audioResponse.data);
-  console.log(`📦 Audio: ${audioBuffer.length} bytes`);
+  try {
+    console.log('📥 Downloading audio...');
+    const audioResponse = await axios.get(audioUrl, {
+      responseType: 'arraybuffer', timeout: 120000,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const audioBuffer = Buffer.from(audioResponse.data);
+    console.log(`📦 Audio: ${audioBuffer.length} bytes`);
 
-  console.log("📝 Моно режим с определением ролей через GPT-4o");
+    console.log('📝 Моно режим с определением ролей через GPT-4o');
 
-  const whisperPrompt = "Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, " +
-    "Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, 9900 тенге";
+    const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, ' +
+      'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, 9900 тенге';
 
-  console.log("🎤 Whisper direct...");
-  const FormData = require("form-data");
-  const fd = new FormData();
-  fd.append("file", audioBuffer, { filename: "audio.mp3", contentType: "audio/mpeg" });
-  fd.append("model", "whisper-1");
-  fd.append("response_format", "verbose_json");
-  fd.append("timestamp_granularities[]", "segment");
-  fd.append("prompt", whisperPrompt);
-  const r = await axios.post("https://api.openai.com/v1/audio/transcriptions", fd, {
-    headers: { "Authorization": `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() }, timeout: 180000
-  });
-  const plainText = r.data.text;
-  const segments = r.data.segments || [];
+    console.log('🎤 Whisper direct...');
+    const FormData = require('form-data');
+    const fd = new FormData();
+    fd.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+    fd.append('model', 'whisper-1');
+    fd.append('response_format', 'verbose_json');
+    fd.append('timestamp_granularities[]', 'segment');
+    fd.append('prompt', whisperPrompt);
+    
+    const r = await axios.post('https://api.openai.com/v1/audio/transcriptions', fd, {
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() }, 
+      timeout: 180000
+    });
+    
+    const plainText = r.data.text || '';
+    const segments = r.data.segments || [];
 
-  console.log(`✅ Whisper: ${plainText.length} chars, ${segments.length} segments`);
+    console.log(`✅ Whisper: ${plainText.length} chars, ${segments.length} segments`);
+
+    if (plainText.length < 15) {
+      return { plain: plainText, formatted: [{ role: 'manager', text: plainText }] };
+    }
+
+    const formatted = await translateAndAssignRolesGPT(plainText, segments);
+    const finalPlain = formatted.map(r => r.text).join(' ');
+    
+    console.log(`✅ Transcription done: ${formatted.length} реплик`);
+    return { plain: finalPlain, formatted };
+    
+  } catch (error) {
+    console.error('❌ Transcription error:', error.message);
+    throw new Error(`Ошибка транскрибации: ${error.message}`);
+  }
+}
 
   if (plainText.length < 15) {
     return { plain: plainText, formatted: [{ role: "manager", text: plainText }] };
