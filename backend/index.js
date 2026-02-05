@@ -22,6 +22,8 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 let bitrixTokens = { access_token: null, refresh_token: null };
 
+// ==================== TOKENS ====================
+
 async function saveTokensToDb() {
   try {
     await supabase.from('settings').upsert({
@@ -45,11 +47,13 @@ async function loadTokensFromDb() {
   return false;
 }
 
+// ==================== ROUTES ====================
+
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
-    message: '🏥 Clinic CallMind API',
-    features: ['bitrix', 'ai-analysis', 'auto-translate-kk-to-ru'],
+    message: '🏥 Clinic CallMind API v2',
+    features: ['bitrix', 'ai-analysis', 'smart-translate-kk-ru', 'gpt4o-role-detection'],
     bitrix_connected: !!bitrixTokens.access_token
   });
 });
@@ -75,8 +79,13 @@ app.get('/api/bitrix/status', (req, res) => {
   res.json({ connected: !!bitrixTokens.access_token, domain: BITRIX_DOMAIN });
 });
 
+// ==================== BITRIX API ====================
+
 async function refreshBitrixToken() {
-  if (!bitrixTokens.refresh_token) { await loadTokensFromDb(); if (!bitrixTokens.refresh_token) return false; }
+  if (!bitrixTokens.refresh_token) {
+    await loadTokensFromDb();
+    if (!bitrixTokens.refresh_token) return false;
+  }
   try {
     const response = await axios.get(`https://${BITRIX_DOMAIN}/oauth/token/?grant_type=refresh_token&client_id=${BITRIX_CLIENT_ID}&client_secret=${BITRIX_CLIENT_SECRET}&refresh_token=${bitrixTokens.refresh_token}`);
     bitrixTokens = { access_token: response.data.access_token, refresh_token: response.data.refresh_token };
@@ -101,6 +110,8 @@ async function callBitrixMethod(method, params = {}) {
   }
 }
 
+// ==================== WEBHOOKS ====================
+
 app.post('/api/bitrix/webhook', async (req, res) => {
   const event = req.body.event || req.body.EVENT;
   if (event === 'ONVOXIMPLANTCALLEND' || event === 'onVoximplantCallEnd') {
@@ -116,6 +127,8 @@ app.post('/api/bitrix/call-webhook', async (req, res) => {
   }
   res.json({ status: 'ok' });
 });
+
+// ==================== SYNC ====================
 
 async function syncNewCalls() {
   if (!bitrixTokens.access_token) return;
@@ -175,245 +188,359 @@ app.get('/api/bitrix/users', async (req, res) => {
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
-// ==================== ПЕРЕВОД КАЗАХСКИЙ → РУССКИЙ ====================
+// ====================================================================
+//  ТРАНСКРИБАЦИЯ v2 — Whisper + GPT-4o (перевод + роли в одном вызове)
+// ====================================================================
 
-async function translateToRussian(text) {
-  if (!text || text.length < 10) return text;
-  
-  const kazakhChars = /[әғқңөұүһі]/i;
-  const kazakhWords = ['сәлем', 'қалай', 'жақсы', 'рақмет', 'иә', 'жоқ', 'керек', 'болады', 'қайда', 'қашан', 'неге', 'кім', 'бар', 'біз', 'сіз', 'олар', 'менің', 'сенің', 'оның', 'ауырады', 'дәрігер', 'емхана'];
-  const lowerText = text.toLowerCase();
-  
-  const hasKazakh = kazakhChars.test(text) || kazakhWords.some(w => lowerText.includes(w));
-  if (!hasKazakh) return text;
-  
-  console.log('🌐 Translating Kazakh → Russian (GPT-4o)...');
-  try {
-    const response = await axios.post(GOOGLE_PROXY_URL, {
-      type: 'chat', apiKey: OPENAI_API_KEY, model: 'gpt-4o', max_tokens: 4000,
-      messages: [{ role: 'user', content: `Ты — профессиональный переводчик с казахского на русский язык.
+/**
+ * Шаг 1: Whisper транскрибация с подсказками для медицинского контекста
+ * Возвращает сырой текст и сегменты с таймкодами
+ */
+async function whisperTranscribe(audioBuffer) {
+  // Подсказка помогает Whisper лучше распознавать специфичные термины
+  const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, МРТ, рентген, ' +
+    'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, буын, омыртқа, ' +
+    'администратор, запись, приём, доктор, консультация, обследование, 9900 тенге';
 
-Это транскрипт телефонного разговора из медицинской клиники (лечение суставов и позвоночника).
-Транскрипт может содержать ошибки автоматического распознавания речи — слова могут быть искажены.
+  let plainText = '';
+  let segments = [];
 
-Твоя задача:
-1. Исправь ошибки транскрибации (распознавания речи)
-2. Переведи казахский текст на грамотный русский язык
-3. Сохрани медицинский контекст разговора (боли в суставах, запись к врачу и т.д.)
-
-Если текст уже на русском — просто исправь ошибки распознавания и верни.
-Верни ТОЛЬКО исправленный/переведённый текст, без комментариев и пояснений.
-
-Текст для обработки:
-${text}` }]
-    }, { timeout: 90000 });
-    const translated = response.data.choices[0].message.content.trim();
-    console.log('✅ Translation complete');
-    return translated;
-  } catch (e) {
-    console.error('Translation error:', e.message);
-    return text;
-  }
-}
-
-async function translateFormatted(formatted) {
-  if (!formatted?.length) return formatted;
-  const allText = formatted.map(r => r.text).join(' ');
-  const kazakhChars = /[әғқңөұүһі]/i;
-  const kazakhWords = ['сәлем', 'қалай', 'жақсы', 'рақмет', 'иә', 'жоқ', 'керек', 'болады'];
-  if (!kazakhChars.test(allText) && !kazakhWords.some(w => allText.toLowerCase().includes(w))) return formatted;
-  
-  const result = [];
-  for (const item of formatted) {
-    result.push({ ...item, text: await translateToRussian(item.text) });
-  }
-  return result;
-}
-
-// ==================== ТРАНСКРИБАЦИЯ ====================
-
-async function transcribeAudio(audioUrl) {
-  console.log('📥 Downloading audio...');
-  const audioResponse = await axios.get(audioUrl, { responseType: 'arraybuffer', timeout: 120000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-  const audioBuffer = Buffer.from(audioResponse.data);
-  console.log(`📦 Audio: ${audioBuffer.length} bytes`);
-  
-  let plainText = '', segments = [];
-  
+  // Попытка через прокси
   if (GOOGLE_PROXY_URL) {
     try {
-      console.log('🎤 Whisper via proxy...');
+      console.log('🎤 Whisper via proxy (with prompt)...');
       const proxyResponse = await axios.post(GOOGLE_PROXY_URL, {
-        type: 'transcribe', apiKey: OPENAI_API_KEY, audio: audioBuffer.toString('base64')
+        type: 'transcribe',
+        apiKey: OPENAI_API_KEY,
+        audio: audioBuffer.toString('base64'),
+        prompt: whisperPrompt
       }, { timeout: 180000 });
+
       if (proxyResponse.data.text) {
         plainText = proxyResponse.data.text;
         segments = proxyResponse.data.segments || [];
       }
-    } catch (e) { console.log('Proxy failed:', e.message); }
+    } catch (e) {
+      console.log('Proxy transcribe failed:', e.message);
+    }
   }
-  
+
+  // Fallback — напрямую к OpenAI
   if (!plainText) {
-    console.log('🎤 Whisper direct...');
+    console.log('🎤 Whisper direct (with prompt)...');
     const FormData = require('form-data');
     const formData = new FormData();
     formData.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
     formData.append('model', 'whisper-1');
     formData.append('response_format', 'verbose_json');
     formData.append('timestamp_granularities[]', 'segment');
+    formData.append('prompt', whisperPrompt);
+
     const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
-      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() }, timeout: 180000
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
+      timeout: 180000
     });
     plainText = response.data.text;
     segments = response.data.segments || [];
   }
-  
-  console.log(`✅ Transcribed: ${plainText.length} chars`);
-  
-  let formatted = formatWithRoles(segments, plainText);
-  
-  // Перевод на русский
-  plainText = await translateToRussian(plainText);
-  formatted = await translateFormatted(formatted);
-  
-  return { plain: plainText, formatted };
+
+  return { plainText, segments };
 }
 
-function formatWithRoles(segments, plainText) {
-  if (!segments?.length) return parseByPatterns(plainText);
-  
-  const formatted = [];
-  let speaker = 'manager', lastEnd = 0;
-  
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    if (seg.start - lastEnd > 1.5 && i > 0) speaker = speaker === 'manager' ? 'client' : 'manager';
-    const detected = detectRole(seg.text);
-    if (detected) speaker = detected;
-    formatted.push({ role: speaker, text: seg.text.trim(), start: seg.start, end: seg.end });
-    lastEnd = seg.end;
+/**
+ * Шаг 2: GPT-4o — перевод на русский + разметка ролей (ОДИН вызов)
+ * Получает сырой транскрипт с таймкодами, возвращает чистый диалог
+ */
+async function translateAndAssignRoles(plainText, segments) {
+  // Формируем текст с таймкодами для GPT-4o
+  let segmentedText;
+  if (segments?.length > 0) {
+    segmentedText = segments.map((seg, i) => {
+      const start = formatTime(seg.start);
+      const end = formatTime(seg.end);
+      return `[${start}-${end}] ${seg.text.trim()}`;
+    }).join('\n');
+  } else {
+    segmentedText = plainText;
   }
-  return mergeReplicas(formatted);
-}
 
-function detectRole(text) {
-  const t = text.toLowerCase();
-  const mgrRu = ['добрый день', 'здравствуйте', 'клиника', 'записать вас', 'мирамед', 'miramed', 'администратор', 'менеджер'];
-  const mgrKz = ['сәлеметсіз', 'қайырлы күн', 'клиника', 'жазайын'];
-  const cliRu = ['хочу записаться', 'болит', 'беспокоит', 'сколько стоит', 'подскажите'];
-  const cliKz = ['жазылғым келеді', 'ауырады', 'мазалайды', 'қанша тұрады'];
-  
-  if ([...mgrRu, ...mgrKz].some(p => t.includes(p))) return 'manager';
-  if ([...cliRu, ...cliKz].some(p => t.includes(p))) return 'client';
-  return null;
-}
+  const prompt = `Ты — эксперт по обработке телефонных разговоров медицинской клиники MIRAMED (Актобе, Казахстан).
+Клиника лечит суставы и позвоночник без операции.
 
-function parseByPatterns(text) {
-  const sentences = text.split(/(?<=[.!?])\s+/);
-  const formatted = [];
-  let speaker = 'manager';
-  for (const s of sentences) {
-    if (!s.trim()) continue;
-    const detected = detectRole(s);
-    if (detected) speaker = detected;
-    formatted.push({ role: speaker, text: s.trim() });
-    if (!detected) speaker = speaker === 'manager' ? 'client' : 'manager';
+Тебе дан сырой транскрипт телефонного звонка с таймкодами. Разговор может быть на казахском, русском или на смеси обоих языков (code-switching).
+
+ТВОИ ЗАДАЧИ:
+
+1. ПЕРЕВОД: Весь текст должен быть на грамотном русском языке.
+   - Казахские фразы переведи на русский
+   - Русские фразы оставь как есть, исправив ошибки распознавания
+   - Медицинские термины переведи корректно (буын = сустав, омыртқа = позвоночник, ауырады = болит и т.д.)
+   - Исправь типичные ошибки Whisper: слипшиеся слова, неправильная пунктуация, искажённые имена
+
+2. РОЛИ: Определи кто говорит — администратор (manager) или пациент (client).
+   Правила определения ролей:
+   - Администратор ВСЕГДА говорит первым (приветствует, представляется)
+   - Администратор: приветствует, называет клинику, спрашивает чем помочь, предлагает запись, называет цены, диктует адрес
+   - Пациент: описывает жалобы/боли, спрашивает о ценах, соглашается/отказывается от записи, называет своё имя
+   - Если звонок начинается с "Алло" / "Сәлеметсіз бе" без представления клиники — это входящий звонок, первый говорит пациент
+   - Если звонок начинается с "Клиника Мирамед" / "Добрый день, клиника" — первый говорит администратор
+   - Смена говорящего определяется по паузам (>1 сек между сегментами), смене темы и контексту
+
+3. ФОРМАТ ОТВЕТА — строго JSON массив:
+[
+  {"role": "manager", "text": "Текст на русском языке"},
+  {"role": "client", "text": "Текст на русском языке"},
+  ...
+]
+
+ВАЖНО:
+- Объединяй подряд идущие реплики одного говорящего в одну
+- Не добавляй от себя слова, которых не было в разговоре
+- Убери мусорные звуки (ммм, ааа, эээ) если они не несут смысла
+- Если текст слишком короткий (1-2 фразы) или это автоответчик/гудки, верни как есть с role: "manager"
+- Верни ТОЛЬКО JSON массив, без комментариев, без markdown
+
+ТРАНСКРИПТ:
+${segmentedText}`;
+
+  console.log('🧠 GPT-4o: translate + roles...');
+  const response = await axios.post(GOOGLE_PROXY_URL, {
+    type: 'chat',
+    apiKey: OPENAI_API_KEY,
+    model: 'gpt-4o',
+    max_tokens: 4000,
+    messages: [{ role: 'user', content: prompt }]
+  }, { timeout: 120000 });
+
+  const content = response.data.choices[0].message.content.trim();
+
+  // Парсим JSON из ответа
+  let formatted;
+  try {
+    // Убираем возможные markdown-обёртки
+    const cleanContent = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    formatted = JSON.parse(cleanContent);
+  } catch (parseError) {
+    // Пробуем найти JSON массив в тексте
+    const match = content.match(/\[[\s\S]*\]/);
+    if (match) {
+      formatted = JSON.parse(match[0]);
+    } else {
+      console.error('❌ Failed to parse GPT-4o role response, falling back');
+      formatted = [{ role: 'manager', text: content }];
+    }
   }
-  return mergeReplicas(formatted);
+
+  // Валидация и очистка
+  formatted = formatted
+    .filter(item => item.text && item.text.trim().length > 0)
+    .map(item => ({
+      role: item.role === 'client' ? 'client' : 'manager',
+      text: item.text.trim()
+    }));
+
+  // Объединяем подряд идущие реплики одного спикера (на случай если GPT не объединил)
+  formatted = mergeConsecutiveReplicas(formatted);
+
+  // Собираем plain text на русском
+  const russianPlainText = formatted.map(r => r.text).join(' ');
+
+  return { plainText: russianPlainText, formatted };
 }
 
-function mergeReplicas(formatted) {
+/**
+ * Объединяет подряд идущие реплики одного и того же спикера
+ */
+function mergeConsecutiveReplicas(formatted) {
   if (!formatted.length) return [];
-  const merged = [formatted[0]];
+  const merged = [{ ...formatted[0] }];
   for (let i = 1; i < formatted.length; i++) {
-    const curr = formatted[i], last = merged[merged.length - 1];
-    if (curr.role === last.role) { last.text += ' ' + curr.text; if (curr.end) last.end = curr.end; }
-    else merged.push(curr);
+    const curr = formatted[i];
+    const last = merged[merged.length - 1];
+    if (curr.role === last.role) {
+      last.text += ' ' + curr.text;
+    } else {
+      merged.push({ ...curr });
+    }
   }
   return merged;
 }
 
-// ==================== ИИ АНАЛИЗ ====================
+/**
+ * Форматирует секунды в MM:SS
+ */
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Главная функция транскрибации
+ * Скачивает аудио → Whisper → GPT-4o (перевод + роли)
+ */
+async function transcribeAudio(audioUrl) {
+  console.log('📥 Downloading audio...');
+  const audioResponse = await axios.get(audioUrl, {
+    responseType: 'arraybuffer',
+    timeout: 120000,
+    headers: { 'User-Agent': 'Mozilla/5.0' }
+  });
+  const audioBuffer = Buffer.from(audioResponse.data);
+  console.log(`📦 Audio: ${audioBuffer.length} bytes`);
+
+  // Шаг 1: Whisper — получаем сырой транскрипт
+  const { plainText: rawText, segments } = await whisperTranscribe(audioBuffer);
+  console.log(`✅ Whisper done: ${rawText.length} chars, ${segments.length} segments`);
+
+  // Если текст слишком короткий — нечего переводить
+  if (rawText.length < 15) {
+    console.log('⚠️ Very short transcript, skipping GPT processing');
+    return {
+      plain: rawText,
+      formatted: [{ role: 'manager', text: rawText }]
+    };
+  }
+
+  // Шаг 2: GPT-4o — перевод + роли
+  const { plainText: russianText, formatted } = await translateAndAssignRoles(rawText, segments);
+  console.log(`✅ GPT-4o done: ${formatted.length} replicas, ${russianText.length} chars`);
+
+  return { plain: russianText, formatted };
+}
+
+// ==================== ИИ АНАЛИЗ (Вызов 2) ====================
 
 async function analyzeCall(transcript, formatted) {
-  const dialogText = formatted?.length ? formatted.map(r => `${r.role === 'manager' ? 'МЕНЕДЖЕР' : 'ПАЦИЕНТ'}: ${r.text}`).join('\n') : transcript;
+  const dialogText = formatted?.length
+    ? formatted.map(r => `${r.role === 'manager' ? 'АДМИНИСТРАТОР' : 'ПАЦИЕНТ'}: ${r.text}`).join('\n')
+    : transcript;
 
   const prompt = `Ты — аудитор колл-центра клиники MIRAMED (Актобе). Оцени звонок.
 
-КОНТЕКСТ: Клиника лечит суставы без операции. Оффер: "Экспертная диагностика" за 9 900 ₸.
+КОНТЕКСТ: Клиника лечит суставы и позвоночник без операции. Оффер: "Экспертная диагностика" за 9 900 ₸.
 
 ДИАЛОГ:
 ${dialogText}
 
 ОЦЕНИ ПО БЛОКАМ (0-100):
-1. КОНТАКТ — приветствие, представление, подтверждение заявки
-2. ВЫЯВЛЕНИЕ БОЛИ — что болит, как давно, мешает ли в быту
-3. ПРЕЗЕНТАЦИЯ — эмпатия, описание оффера, цена 9 900 ₸
-4. ЗАПИСЬ — предложить время, не спрашивать "хотите?"
-5. ВОЗРАЖЕНИЯ — если были, как отработал (если не было — 80)
-6. ФИНАЛИЗАЦИЯ — ФИО, дата, адрес, напоминания
+1. КОНТАКТ — приветствие, представление клиники, подтверждение заявки
+2. ВЫЯВЛЕНИЕ БОЛИ — что болит, как давно, мешает ли в быту, были ли обследования
+3. ПРЕЗЕНТАЦИЯ — эмпатия, описание оффера "Экспертная диагностика", цена 9 900 ₸
+4. ЗАПИСЬ — предложить конкретное время, не спрашивать "хотите ли вы?"
+5. ВОЗРАЖЕНИЯ — если были, как отработал (если возражений не было — ставь 80)
+6. ФИНАЛИЗАЦИЯ — подтверждение ФИО, дата и время записи, адрес клиники, напоминание
 
-ПРАВИЛА: Короткий/недозвон = 70 за всё. total_score = среднее 6 блоков.
+ПРАВИЛА ОЦЕНКИ:
+- Короткий звонок / недозвон / автоответчик = 70 за все блоки
+- Если звонок на казахском и был переведён — оценивай по содержанию, не снижай за язык
+- total_score = среднее арифметическое 6 блоков (округли до целого)
 
-Ответь JSON:
+Ответь ТОЛЬКО JSON:
 {
   "call_type": "ПЕРВИЧНЫЙ|ПОВТОРНЫЙ|СЕРВИСНЫЙ|КОРОТКИЙ",
-  "block1_score": число, "block1_explanation": "...",
-  "block2_score": число, "block2_explanation": "...",
-  "block3_score": число, "block3_explanation": "...",
-  "block4_score": число, "block4_explanation": "...",
-  "block5_score": число, "block5_explanation": "...",
-  "block6_score": число, "block6_explanation": "...",
+  "block1_score": число, "block1_explanation": "краткое объяснение на русском",
+  "block2_score": число, "block2_explanation": "краткое объяснение на русском",
+  "block3_score": число, "block3_explanation": "краткое объяснение на русском",
+  "block4_score": число, "block4_explanation": "краткое объяснение на русском",
+  "block5_score": число, "block5_explanation": "краткое объяснение на русском",
+  "block6_score": число, "block6_explanation": "краткое объяснение на русском",
   "total_score": число,
-  "client_info": { "facts": [], "needs": [], "pains": [], "objections": [] },
-  "ai_summary": "Резюме 2-3 предложения",
+  "client_info": {
+    "facts": ["возраст, пол, имя если назвал"],
+    "needs": ["что хочет: записаться, узнать цену и т.д."],
+    "pains": ["что болит, как давно, какие симптомы"],
+    "objections": ["возражения если были"]
+  },
+  "ai_summary": "Резюме звонка в 2-3 предложениях на русском",
   "is_successful": true/false
 }`;
 
+  console.log('🤖 GPT-4o: analyzing call quality...');
   const response = await axios.post(GOOGLE_PROXY_URL, {
-    type: 'chat', apiKey: OPENAI_API_KEY, model: 'gpt-4o', max_tokens: 2500,
+    type: 'chat',
+    apiKey: OPENAI_API_KEY,
+    model: 'gpt-4o',
+    max_tokens: 2500,
     messages: [{ role: 'user', content: prompt }]
   }, { timeout: 120000 });
 
   const content = response.data.choices[0].message.content;
   const match = content.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON in response');
+  if (!match) throw new Error('No JSON in analysis response');
   return JSON.parse(match[0]);
 }
+
+// ==================== ANALYZE BY ID ====================
 
 async function analyzeCallById(callId) {
   const { data: call } = await supabase.from('calls').select('*').eq('id', callId).single();
   if (!call?.audio_url) throw new Error('No audio');
 
-  console.log(`🎤 Transcribing call ${callId}...`);
-  const { plain, formatted } = await transcribeAudio(call.audio_url);
-  await supabase.from('calls').update({ transcript: plain, transcript_formatted: formatted }).eq('id', callId);
+  console.log(`\n${'='.repeat(50)}`);
+  console.log(`🎤 Processing call ${callId}...`);
+  console.log(`${'='.repeat(50)}`);
 
-  console.log(`🤖 Analyzing call ${callId}...`);
+  // Шаг 1+2: Транскрибация + перевод + роли
+  const { plain, formatted } = await transcribeAudio(call.audio_url);
+  await supabase.from('calls').update({
+    transcript: plain,
+    transcript_formatted: formatted
+  }).eq('id', callId);
+
+  // Шаг 3: Анализ качества
   const analysis = await analyzeCall(plain, formatted);
 
   await supabase.from('call_scores').upsert({
-    call_id: callId, call_type: analysis.call_type, total_score: Math.round(analysis.total_score),
-    block1_score: Math.round(analysis.block1_score), block2_score: Math.round(analysis.block2_score),
-    block3_score: Math.round(analysis.block3_score), block4_score: Math.round(analysis.block4_score),
-    block5_score: Math.round(analysis.block5_score), block6_score: Math.round(analysis.block6_score),
+    call_id: callId,
+    call_type: analysis.call_type,
+    total_score: Math.round(analysis.total_score),
+    block1_score: Math.round(analysis.block1_score),
+    block2_score: Math.round(analysis.block2_score),
+    block3_score: Math.round(analysis.block3_score),
+    block4_score: Math.round(analysis.block4_score),
+    block5_score: Math.round(analysis.block5_score),
+    block6_score: Math.round(analysis.block6_score),
     score_explanations: {
-      block1: analysis.block1_explanation, block2: analysis.block2_explanation,
-      block3: analysis.block3_explanation, block4: analysis.block4_explanation,
-      block5: analysis.block5_explanation, block6: analysis.block6_explanation
+      block1: analysis.block1_explanation,
+      block2: analysis.block2_explanation,
+      block3: analysis.block3_explanation,
+      block4: analysis.block4_explanation,
+      block5: analysis.block5_explanation,
+      block6: analysis.block6_explanation
     },
-    client_info: analysis.client_info, ai_summary: analysis.ai_summary, is_successful: analysis.is_successful
+    client_info: analysis.client_info,
+    ai_summary: analysis.ai_summary,
+    is_successful: analysis.is_successful
   }, { onConflict: 'call_id' });
 
-  console.log(`✅ Call ${callId}: ${analysis.total_score}/100`);
+  console.log(`✅ Call ${callId} done: ${analysis.total_score}/100`);
   return { transcript: plain, formatted, analysis };
 }
+
+// ==================== API ROUTES ====================
 
 app.post('/api/analyze/:callId', async (req, res) => {
   try {
     const result = await analyzeCallById(req.params.callId);
     res.json({ success: true, analysis: result.analysis });
   } catch (error) {
+    console.error(`Analysis error for call ${req.params.callId}:`, error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Переанализ — сбрасывает старый результат и анализирует заново
+app.post('/api/reanalyze/:callId', async (req, res) => {
+  try {
+    // Удаляем старые данные
+    await supabase.from('call_scores').delete().eq('call_id', req.params.callId);
+    await supabase.from('calls').update({ transcript: null, transcript_formatted: null }).eq('id', req.params.callId);
+
+    const result = await analyzeCallById(req.params.callId);
+    res.json({ success: true, analysis: result.analysis });
+  } catch (error) {
+    console.error(`Reanalysis error for call ${req.params.callId}:`, error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -443,10 +570,12 @@ app.get('/api/calls/:id', async (req, res) => {
 app.get('/api/whatsapp/chats', (req, res) => res.json({ chats: [], message: 'В разработке' }));
 app.get('/api/whatsapp/analyses', (req, res) => res.json({ analyses: [], message: 'В разработке' }));
 
+// ==================== START ====================
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(`🏥 CallMind на порту ${PORT}`);
-  console.log(`🌐 Автоперевод: казахский → русский`);
+  console.log(`🏥 CallMind v2 на порту ${PORT}`);
+  console.log(`🧠 Pipeline: Whisper → GPT-4o (translate+roles) → GPT-4o (analysis)`);
   if (await loadTokensFromDb()) {
     setInterval(() => syncNewCalls().catch(console.error), 5 * 60 * 1000);
     setTimeout(() => syncNewCalls(), 30000);
