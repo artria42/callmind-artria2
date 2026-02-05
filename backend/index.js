@@ -578,15 +578,6 @@ async function transcribeAudio(audioUrl) {
   }
 }
 
-  if (plainText.length < 15) {
-    return { plain: plainText, formatted: [{ role: "manager", text: plainText }] };
-  }
-
-  const formatted = await translateAndAssignRolesGPT(plainText, segments);
-  return { plain: formatted.map(r => r.text).join(" "), formatted };
-}
-}
-
 // ==================== ИИ АНАЛИЗ ====================
 
 async function analyzeCall(transcript, formatted) {
