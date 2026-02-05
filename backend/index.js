@@ -342,6 +342,129 @@ function mergeChannelTranscripts(managerResult, clientResult) {
 }
 
 /**
+ * GPT-4o: Синхронизация двух каналов + перевод
+ * МОЩНЫЙ ПРОМПТ для точной синхронизации и перевода
+ */
+async function syncAndTranslateChannels(adminText, clientText) {
+  const prompt = `# ROLE & OBJECTIVE
+Ты — AI-движок для синхронизации и перевода диалогов колл-центра. 
+Твоя задача: взять два изолированных текстовых потока (Канал Администратора и Канал Клиента), перевести их с казахского/смешанного на русский и объединить в единый хронологически верный диалог в формате JSON.
+
+# INPUT DATA
+У тебя два входных блока:
+1. [ADMIN_CHANNEL]: Речь оператора/администратора (всегда role: "manager").
+2. [CLIENT_CHANNEL]: Речь пациента (всегда role: "client").
+
+# CRITICAL RULES (STEP-BY-STEP)
+
+## ШАГ 1: ПЕРЕВОД И НОРМАЛИЗАЦИЯ
+- Весь текст должен стать РУССКИМ.
+- Если исходник на казахском: Переводи смысловой перевод, но сохраняй структуру фразы.
+- Если исходник "шала-казахский" (смесь): Переводи полностью на русский литературный язык.
+- Медицинские термины переводи строго:
+  буын -> сустав
+  омыртқа -> позвоночник
+  бел -> поясница
+  тізе -> колено
+  иық -> плечо
+  мойын -> шея
+  ауырады -> болит
+  қатты ауырады -> сильно болит
+  дәрігер -> врач
+  емхана -> клиника
+  тексеру -> обследование
+  жазылу -> записаться на приём
+  МРТ -> МРТ
+  рентген -> рентген
+- Исправляй ошибки транскрибации (STT), если слово очевидно искажено (например, "здрасти" -> "Здравствуйте"), но НЕ меняй смысл сказанного.
+
+## ШАГ 2: СИНХРОНИЗАЦИЯ (САМОЕ ВАЖНОЕ)
+Тексты даны блоками. Тебе нужно разбить их на реплики и расставить в правильном порядке.
+Используй логику "Вопрос-Ответ":
+- Если Manager здоровается -> Client здоровается в ответ.
+- Если Manager задает вопрос -> ищи ответ в тексте Client.
+- Если Client задает вопрос -> ищи ответ в тексте Manager.
+- Обычно диалог начинает Manager.
+- Разделяй длинные монологи на короткие реплики (1-3 предложения).
+- Чередуй роли естественным образом (вопрос-ответ-вопрос-ответ).
+
+## ШАГ 3: ФОРМАТ JSON
+Верни строго валидный JSON массив.
+Структура: [{"role": "manager", "text": "Текст..."}, {"role": "client", "text": "Текст..."}]
+
+# RESTRICTIONS
+- НЕ добавляй отсебятины. Если фразы нет в исходнике, не пиши её.
+- НЕ теряй реплики. Весь текст из обоих каналов должен попасть в финал.
+- НЕ пиши никаких вступлений, пояснений или markdown (\`\`\`json). ТОЛЬКО чистый JSON.
+
+# CONTEXT FOR MERGING
+Диалог — это запись к врачу клиники Мирамед. Ожидаемая структура: Приветствие -> Уточнение проблемы -> Предложение услуги -> Обсуждение цены/времени -> Прощание.
+
+[ADMIN_CHANNEL]
+${adminText}
+
+[CLIENT_CHANNEL]
+${clientText}`;
+
+  console.log('🧠 GPT-4o: синхронизация каналов...');
+  const response = await axios.post(GOOGLE_PROXY_URL, {
+    type: 'chat', 
+    apiKey: OPENAI_API_KEY, 
+    model: 'gpt-4o', 
+    max_tokens: 4000,
+    temperature: 0.1,
+    messages: [{ role: 'user', content: prompt }]
+  }, { timeout: 120000 });
+
+  const content = response.data.choices[0].message.content.trim();
+  let formatted;
+  try {
+    const clean = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+    formatted = JSON.parse(clean);
+  } catch (e) {
+    const match = content.match(/\[[\s\S]*\]/);
+    formatted = match ? JSON.parse(match[0]) : [];
+  }
+
+  // Валидация
+  formatted = formatted
+    .filter(item => item.text && item.text.trim().length > 0)
+    .map(item => ({
+      role: item.role === 'client' ? 'client' : 'manager',
+      text: item.text.trim()
+    }));
+
+  return formatted;
+}
+
+/**
+ * Whisper транскрибация одного канала (ТОЛЬКО ТЕКСТ, без segments)
+ */
+async function whisperTranscribeChannel(audioBuffer, channelName) {
+  const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, МРТ, рентген, ' +
+    'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, буын, омыртқа, ' +
+    'администратор, запись, приём, доктор, консультация, обследование, 9900 тенге';
+
+  console.log(`🎤 Whisper [${channelName}]...`);
+  const FormData = require('form-data');
+  const formData = new FormData();
+  formData.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+  formData.append('model', 'whisper-1');
+  formData.append('response_format', 'text');
+  formData.append('prompt', whisperPrompt);
+  
+  const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
+    timeout: 180000
+  });
+  
+  const plainText = response.data || '';
+
+  console.log(`✅ Whisper [${channelName}]: ${plainText.length} chars`);
+  return { plainText, segments: [] };
+}
+
+/**
  * GPT-4o: ТОЧНЫЙ перевод + нарезка на реплики
  * 🔥 ИСПРАВЛЕННАЯ ВЕРСИЯ v2 — передаём таймкоды для сохранения хронологии
  */
@@ -526,7 +649,7 @@ ${segmentedText}`;
 
 /**
  * ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ
- * ОТКЛЮЧЁН СТЕРЕО-РЕЖИМ - не работает из-за crosstalk
+ * СТЕРЕО-РЕЖИМ с умной синхронизацией через GPT-4o
  */
 async function transcribeAudio(audioUrl) {
   try {
@@ -538,8 +661,39 @@ async function transcribeAudio(audioUrl) {
     const audioBuffer = Buffer.from(audioResponse.data);
     console.log(`📦 Audio: ${audioBuffer.length} bytes`);
 
-    console.log('📝 Моно режим с определением ролей через GPT-4o');
+    // СТЕРЕО РЕЖИМ
+    if (FFMPEG_AVAILABLE) {
+      try {
+        const channels = splitStereoChannels(audioBuffer);
 
+        if (channels) {
+          console.log('🔀 Стерео режим — раздельная транскрибация');
+
+          const [managerResult, clientResult] = await Promise.all([
+            whisperTranscribeChannel(channels.manager, 'администратор'),
+            whisperTranscribeChannel(channels.client, 'пациент')
+          ]);
+
+          if (!managerResult.plainText && !clientResult.plainText) {
+            return { plain: '', formatted: [] };
+          }
+
+          console.log(`✅ Whisper done: Manager ${managerResult.plainText.length}ch, Client ${clientResult.plainText.length}ch`);
+
+          // GPT-4o: Синхронизация + перевод
+          const formatted = await syncAndTranslateChannels(managerResult.plainText, clientResult.plainText);
+          const plainText = formatted.map(r => r.text).join(' ');
+
+          console.log(`✅ Стерео pipeline done: ${formatted.length} реплик`);
+          return { plain: plainText, formatted };
+        }
+      } catch (e) {
+        console.error('⚠️ Stereo failed:', e.message);
+      }
+    }
+
+    // МОНО FALLBACK
+    console.log('📝 Моно режим');
     const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, ' +
       'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, 9900 тенге';
 
@@ -569,7 +723,7 @@ async function transcribeAudio(audioUrl) {
     const formatted = await translateAndAssignRolesGPT(plainText, segments);
     const finalPlain = formatted.map(r => r.text).join(' ');
     
-    console.log(`✅ Transcription done: ${formatted.length} реплик`);
+    console.log(`✅ Mono pipeline done: ${formatted.length} реплик`);
     return { plain: finalPlain, formatted };
     
   } catch (error) {
