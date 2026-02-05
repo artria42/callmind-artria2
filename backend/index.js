@@ -420,7 +420,7 @@ ${clientText}`;
 }
 
 /**
- * Whisper транскрибация одного канала (ТОЛЬКО ТЕКСТ, без segments)
+ * Whisper транскрибация одного канала (с дедупликацией повторов)
  */
 async function whisperTranscribeChannel(audioBuffer, channelName) {
   const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, МРТ, рентген, ' +
@@ -432,7 +432,8 @@ async function whisperTranscribeChannel(audioBuffer, channelName) {
   const formData = new FormData();
   formData.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
   formData.append('model', 'whisper-1');
-  formData.append('response_format', 'text');
+  formData.append('response_format', 'verbose_json');  // ВЕРНУЛ verbose_json
+  formData.append('timestamp_granularities[]', 'segment');
   formData.append('prompt', whisperPrompt);
   
   const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
@@ -440,10 +441,24 @@ async function whisperTranscribeChannel(audioBuffer, channelName) {
     timeout: 180000
   });
   
-  const plainText = response.data || '';
+  const segments = response.data.segments || [];
+  
+  // ДЕДУПЛИКАЦИЯ: убираем подряд идущие одинаковые сегменты (глюк Whisper)
+  const deduped = [];
+  for (const seg of segments) {
+    const text = seg.text.trim();
+    const lastText = deduped.length > 0 ? deduped[deduped.length - 1].text.trim() : '';
+    
+    // Если текущий сегмент отличается от предыдущего - добавляем
+    if (text !== lastText && text.length > 0) {
+      deduped.push(seg);
+    }
+  }
+  
+  const plainText = deduped.map(s => s.text).join(' ').trim();
 
-  console.log(`✅ Whisper [${channelName}]: ${plainText.length} chars`);
-  return { plainText, segments: [] };
+  console.log(`✅ Whisper [${channelName}]: ${plainText.length} chars (${segments.length} сегментов, ${deduped.length} после дедупликации)`);
+  return { plainText, segments: deduped };
 }
 
 /**
