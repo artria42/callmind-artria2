@@ -204,7 +204,7 @@ app.get('/api/bitrix/users', async (req, res) => {
 });
 
 // ====================================================================
-//  ТРАНСКРИБАЦИЯ v3 — Стерео-разделение + Whisper + GPT-4o перевод
+//  ТРАНСКРИБАЦИЯ v3.1 — ИСПРАВЛЕННАЯ ВЕРСИЯ
 // ====================================================================
 
 /**
@@ -254,47 +254,29 @@ function splitStereoChannels(audioBuffer) {
 
 /**
  * Whisper транскрибация одного канала
+ * ВРЕМЕННО: прокси НЕ возвращает segments, звоним OpenAI напрямую
  */
 async function whisperTranscribeChannel(audioBuffer, channelName) {
   const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, МРТ, рентген, ' +
     'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, буын, омыртқа, ' +
     'администратор, запись, приём, доктор, консультация, обследование, 9900 тенге';
 
-  let plainText = '';
-  let segments = [];
-
-  if (GOOGLE_PROXY_URL) {
-    try {
-      console.log(`🎤 Whisper [${channelName}] via proxy...`);
-      const proxyResponse = await axios.post(GOOGLE_PROXY_URL, {
-        type: 'transcribe', apiKey: OPENAI_API_KEY,
-        audio: audioBuffer.toString('base64'), prompt: whisperPrompt
-      }, { timeout: 180000 });
-      if (proxyResponse.data.text) {
-        plainText = proxyResponse.data.text;
-        segments = proxyResponse.data.segments || [];
-      }
-    } catch (e) {
-      console.log(`Proxy [${channelName}] failed:`, e.message);
-    }
-  }
-
-  if (!plainText) {
-    console.log(`🎤 Whisper [${channelName}] direct...`);
-    const FormData = require('form-data');
-    const formData = new FormData();
-    formData.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
-    formData.append('model', 'whisper-1');
-    formData.append('response_format', 'verbose_json');
-    formData.append('timestamp_granularities[]', 'segment');
-    formData.append('prompt', whisperPrompt);
-    const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
-      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
-      timeout: 180000
-    });
-    plainText = response.data.text;
-    segments = response.data.segments || [];
-  }
+  console.log(`🎤 Whisper [${channelName}] direct OpenAI (нужны segments)...`);
+  const FormData = require('form-data');
+  const formData = new FormData();
+  formData.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+  formData.append('model', 'whisper-1');
+  formData.append('response_format', 'verbose_json');
+  formData.append('timestamp_granularities[]', 'segment');
+  formData.append('prompt', whisperPrompt);
+  
+  const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
+    timeout: 180000
+  });
+  
+  const plainText = response.data.text;
+  const segments = response.data.segments || [];
 
   console.log(`✅ Whisper [${channelName}]: ${plainText.length} chars, ${segments.length} segments`);
   return { plainText, segments };
@@ -302,13 +284,12 @@ async function whisperTranscribeChannel(audioBuffer, channelName) {
 
 /**
  * Объединяет транскрипты двух каналов в хронологический диалог по таймкодам
- * Fallback: если сегментов нет (прокси не вернул), использует plainText целиком
  */
 function mergeChannelTranscripts(managerResult, clientResult) {
   const managerSegs = managerResult.segments || [];
   const clientSegs = clientResult.segments || [];
 
-  // Fallback: если сегментов нет — используем plainText как целые реплики
+  // Fallback: если сегментов нет — используем plainText целиком
   if (managerSegs.length === 0 && clientSegs.length === 0) {
     console.log('⚠️ Нет сегментов — используем plainText');
     const result = [];
@@ -318,11 +299,9 @@ function mergeChannelTranscripts(managerResult, clientResult) {
     if (clientResult.plainText?.trim()) {
       result.push({ role: 'client', text: clientResult.plainText.trim(), start: 0, end: 0 });
     }
-    // Администратор обычно говорит первым
     return result;
   }
 
-  // Если у одного канала нет сегментов, но есть текст — добавляем как одну реплику
   const allSegments = [];
 
   if (managerSegs.length > 0) {
@@ -348,7 +327,7 @@ function mergeChannelTranscripts(managerResult, clientResult) {
   // Хронологическая сортировка
   allSegments.sort((a, b) => a.start - b.start);
 
-  // Объединяем подряд идущие реплики одного спикера
+  // Объединяем подряд идущие реплики одного спикера (пауза < 2 сек)
   const merged = [];
   for (const seg of allSegments) {
     const last = merged[merged.length - 1];
@@ -363,50 +342,201 @@ function mergeChannelTranscripts(managerResult, clientResult) {
 }
 
 /**
+ * GPT-4o: ПРОСТОЙ перевод двух каналов абзацами
+ * БЕЗ синхронизации - просто точный перевод
+ */
+async function syncAndTranslateChannels(adminText, clientText) {
+  console.log('\n' + '='.repeat(60));
+  console.log('📝 ИСХОДНЫЙ ТЕКСТ ОТ WHISPER:');
+  console.log('='.repeat(60));
+  console.log('\n[АДМИН КАНАЛ]');
+  console.log(adminText);
+  console.log('\n[ПАЦИЕНТ КАНАЛ]');
+  console.log(clientText);
+  console.log('='.repeat(60) + '\n');
+
+  // Переводим каждый канал отдельно
+  const adminTranslated = await translateChannel(adminText, 'администратор');
+  const clientTranslated = await translateChannel(clientText, 'пациент');
+
+  // Формируем простой диалог: админ-пациент-админ-пациент
+  const formatted = [
+    { role: 'manager', text: adminTranslated },
+    { role: 'client', text: clientTranslated }
+  ];
+
+  console.log(`✅ Результат: 2 блока (администратор + пациент)\n`);
+  
+  return formatted;
+}
+
+/**
+ * Переводим один канал целиком
+ */
+async function translateChannel(text, channelName) {
+  if (!text || text.trim().length === 0) {
+    return `(${channelName} — нет данных)`;
+  }
+
+  const prompt = `Ты — профессиональный переводчик медицинских диалогов (казахский/русский микс → чистый русский).
+
+КОНТЕКСТ: Это телефонный разговор клиники Мирамед (Актобе). Лечат суставы и позвоночник.
+
+ЗАДАЧА: Перевести текст на ГРАМОТНЫЙ русский. Whisper мог ошибиться в распознавании — исправь очевидные ошибки.
+
+ПРИМЕРЫ ПРАВИЛЬНОГО ПЕРЕВОДА:
+
+Казахский → Русский:
+"Сәлеметсіз бе" → "Здравствуйте"
+"Қалай ауырады" → "Как болит"
+"Түнде мазалайма" → "Беспокоит ли ночью"
+"Жүргенде мазалайма" → "Беспокоит ли при ходьбе"
+"Жүргенде көп жүре алмайым" → "Когда хожу, не могу много ходить"
+"Бір орында тұрсам" → "Если стою на одном месте"
+"Аяғымды түсіргізді" → "Сделали рентген ног"
+"Артыроз деп айтты" → "Сказали артроз"
+"Операция керек" → "Нужна операция"
+"Мен қаламадым" → "Я не хотела"
+"Зейнетақы" → "Пенсия"
+"Келесі апта" → "Следующая неделя"
+
+Медицинские термины:
+буын → сустав
+омыртқа → позвоночник
+бел → поясница
+тізе → колено
+ауырады → болит
+дәрігер → врач
+емхана → клиника
+
+ОШИБКИ WHISPER (исправь):
+"оғырадай түсірсеңіз" → скорее всего "как болит"
+"Аллаға сауын атып" → скорее всего "Алло"
+"қабардастым" → скорее всего "слушаю вас"
+
+ПРАВИЛА:
+✅ Переводи ДОСЛОВНО, не пересказывай
+✅ Сохраняй все детали, цифры, имена
+✅ Если непонятно — пиши что понял (не выдумывай)
+❌ НЕ добавляй отсебятины
+❌ НЕ сокращай
+
+ТЕКСТ ДЛЯ ПЕРЕВОДА:
+${text}
+
+Верни ТОЛЬКО перевод на русском. Без комментариев, без пояснений.`;
+
+  const response = await axios.post(GOOGLE_PROXY_URL, {
+    type: 'chat',
+    apiKey: OPENAI_API_KEY,
+    model: 'gpt-4o',
+    max_tokens: 3000,
+    temperature: 0,
+    messages: [{ role: 'user', content: prompt }]
+  }, { timeout: 120000 });
+
+  return response.data.choices[0].message.content.trim();
+}
+
+/**
+ * Whisper транскрибация одного канала (с дедупликацией повторов)
+ */
+async function whisperTranscribeChannel(audioBuffer, channelName) {
+  const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, МРТ, рентген, ' +
+    'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, буын, омыртқа, ' +
+    'администратор, запись, приём, доктор, консультация, обследование, 9900 тенге';
+
+  console.log(`🎤 Whisper [${channelName}]...`);
+  const FormData = require('form-data');
+  const formData = new FormData();
+  formData.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+  formData.append('model', 'whisper-1');
+  formData.append('response_format', 'verbose_json');  // ВЕРНУЛ verbose_json
+  formData.append('timestamp_granularities[]', 'segment');
+  formData.append('prompt', whisperPrompt);
+  
+  const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
+    timeout: 180000
+  });
+  
+  const segments = response.data.segments || [];
+  
+  // ДЕДУПЛИКАЦИЯ: убираем подряд идущие одинаковые сегменты (глюк Whisper)
+  const deduped = [];
+  for (const seg of segments) {
+    const text = seg.text.trim();
+    const lastText = deduped.length > 0 ? deduped[deduped.length - 1].text.trim() : '';
+    
+    // Если текущий сегмент отличается от предыдущего - добавляем
+    if (text !== lastText && text.length > 0) {
+      deduped.push(seg);
+    }
+  }
+  
+  const plainText = deduped.map(s => s.text).join(' ').trim();
+
+  console.log(`✅ Whisper [${channelName}]: ${plainText.length} chars (${segments.length} сегментов, ${deduped.length} после дедупликации)`);
+  return { plainText, segments: deduped };
+}
+
+/**
  * GPT-4o: ТОЧНЫЙ перевод + нарезка на реплики
- * Роли определены по каналам. GPT строго переводит и нарезает, НЕ ДОБАВЛЯЯ и НЕ УБИРАЯ смысл.
+ * 🔥 ИСПРАВЛЕННАЯ ВЕРСИЯ v2 — передаём таймкоды для сохранения хронологии
  */
 async function translateDialogue(formatted) {
-  const dialogText = formatted.map(r =>
-    `[${r.role === 'manager' ? 'АДМИНИСТРАТОР' : 'ПАЦИЕНТ'}]\n${r.text}`
-  ).join('\n\n');
+  // Формируем диалог с таймкодами, чтобы GPT видел последовательность
+  const dialogText = formatted.map(r => {
+    const time = r.start ? `[${formatTime(r.start)}]` : '';
+    const role = r.role === 'manager' ? 'АДМИНИСТРАТОР' : 'ПАЦИЕНТ';
+    return `${time} ${role}: ${r.text}`;
+  }).join('\n');
 
-  const prompt = `Ты — точный переводчик телефонных разговоров.
+  const prompt = `Ты — профессиональный переводчик медицинских звонков клиники MIRAMED (Актобе, Казахстан).
 
-У тебя есть запись двух аудиоканалов телефонного звонка. Каждый канал — речь одного человека (АДМИНИСТРАТОР или ПАЦИЕНТ). Текст идёт сплошным блоком, потому что записан с отдельной дорожки.
+КОНТЕКСТ: Звонок записан в стерео. Каждая строка — это один сегмент речи с таймкодом.
 
-ЗАДАЧА 1 — ТОЧНЫЙ ПЕРЕВОД:
-- Если текст на казахском — переведи на русский ДОСЛОВНО, сохраняя смысл каждого предложения
-- Если на русском — оставь как есть, только исправь ошибки распознавания речи
-- Медицинские термины: буын=сустав, омыртқа=позвоночник, ауырады=болит, бел=поясница, тізе=колено, иық=плечо
-- ЗАПРЕЩЕНО выдумывать, дополнять, перефразировать или убирать что-либо. Каждое предложение оригинала ДОЛЖНО быть в результате
+ЗАДАЧА 1 — ПЕРЕВОД:
+- Если текст на казахском → переведи на русский ДОСЛОВНО
+- Если на русском → оставь как есть, исправь только ошибки распознавания
+- Медицинский словарь:
+  буын=сустав, омыртқа=позвоночник, бел=поясница, тізе=колено, иық=плечо
+  ауырады=болит, қатты ауырады=сильно болит, ісініп кетті=отекло
+  қозғалыс=движение, дәрігер=врач, емхана=клиника, тексеру=обследование
 
-ЗАДАЧА 2 — НАРЕЗКА НА РЕПЛИКИ:
-- Раздели сплошной текст каждого говорящего на отдельные реплики (по 1-3 предложения)
-- Режь по смысловым границам: конец мысли, пауза, смена темы
-- Чередуй реплики АДМИНИСТРАТОРА и ПАЦИЕНТА в логическом порядке диалога
-- Роли НЕ МЕНЯЙ — что было от АДМИНИСТРАТОРА остаётся manager, от ПАЦИЕНТА — client
+ЗАДАЧА 2 — СТРУКТУРА ДИАЛОГА:
+- Раздели длинные реплики на короткие (1-3 предложения)
+- СТРОГО СОХРАНЯЙ ХРОНОЛОГИЮ — реплики должны чередоваться так, как идут в диалоге
+- Если администратор говорит несколько раз подряд — так и оставь
+- НЕ МЕНЯЙ РОЛИ — что было manager остаётся manager
 
-СТРОГИЕ ЗАПРЕТЫ:
-❌ НЕ выдумывай текст, которого нет в оригинале
-❌ НЕ пропускай предложения — всё должно быть переведено
-❌ НЕ сокращай и не объединяй мысли
-❌ НЕ меняй смысл — если пациент отказался, он отказался. Если возразил — он возразил.
-❌ НЕ добавляй вежливые фразы, которых не было
+ЗАПРЕТЫ:
+❌ НЕ объединяй весь текст администратора в один блок
+❌ НЕ объединяй весь текст пациента в один блок
+❌ НЕ выдумывай текст
+❌ НЕ меняй порядок реплик
 
-ФОРМАТ — JSON массив:
+ПРИМЕР:
+Вход:
+[0:01] АДМИНИСТРАТОР: Сәлеметсіз бе клиника Мирамед
+[0:05] ПАЦИЕНТ: Сәлем менің белім ауырады
+[0:10] АДМИНИСТРАТОР: Қанша уақыт ауырады
+[0:14] ПАЦИЕНТ: Екі апта болды
+
+Выход:
 [
-  {"role": "manager", "text": "точный перевод реплики"},
-  {"role": "client", "text": "точный перевод реплики"},
-  ...
+  {"role": "manager", "text": "Здравствуйте, клиника Мирамед."},
+  {"role": "client", "text": "Здравствуйте, у меня поясница болит."},
+  {"role": "manager", "text": "Сколько времени болит?"},
+  {"role": "client", "text": "Уже две недели."}
 ]
 
-Верни ТОЛЬКО JSON. Без комментариев, без markdown-обёрток.
+ФОРМАТ — JSON массив. Без markdown.
 
-АУДИОДОРОЖКИ:
+ДИАЛОГ:
 ${dialogText}`;
 
-  console.log('🧠 GPT-4o: translating stereo dialogue...');
+  console.log('🧠 GPT-4o: translating with timecodes...');
   const response = await axios.post(GOOGLE_PROXY_URL, {
     type: 'chat', apiKey: OPENAI_API_KEY, model: 'gpt-4o', max_tokens: 4000,
     messages: [{ role: 'user', content: prompt }]
@@ -419,10 +549,10 @@ ${dialogText}`;
     translated = JSON.parse(clean);
   } catch (e) {
     const match = content.match(/\[[\s\S]*\]/);
-    translated = match ? JSON.parse(match[0]) : formatted;
+    translated = match ? JSON.parse(match[0]) : formatted.map(r => ({ role: r.role, text: r.text }));
   }
 
-  // Валидация — GPT теперь возвращает больше реплик чем было на входе (это правильно)
+  // Валидация
   translated = translated
     .filter(item => item.text && item.text.trim().length > 0)
     .map(item => ({
@@ -430,12 +560,20 @@ ${dialogText}`;
       text: item.text.trim()
     }));
 
-  // Объединяем подряд идущие реплики одного спикера (на случай дублей)
-  return mergeConsecutive(translated);
+  // НЕ объединяем подряд идущие реплики — пусть GPT сам решает
+  return translated;
+}
+
+// Вспомогательная функция для форматирования времени
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 /**
- * Fallback: GPT-4o определяет роли (если аудио моно)
+ * GPT-4o определяет роли + переводит (моно режим)
+ * УЛУЧШЕННАЯ ВЕРСИЯ с примерами реальных диалогов
  */
 async function translateAndAssignRolesGPT(plainText, segments) {
   let segmentedText;
@@ -451,24 +589,57 @@ async function translateAndAssignRolesGPT(plainText, segments) {
 
   const prompt = `Ты — эксперт по обработке звонков клиники MIRAMED (Актобе, Казахстан).
 
-Тебе дан сырой транскрипт звонка. Разговор на казахском, русском или смеси.
+КОНТЕКСТ: Телефонный разговор. Оба голоса записаны в одном аудио. Язык: казахский, русский или смесь.
 
 ЗАДАЧИ:
-1. Переведи всё на грамотный русский
-2. Исправь ошибки Whisper
-3. Определи роли: администратор (manager) или пациент (client)
-   - Администратор: приветствует, называет клинику, предлагает запись
-   - Пациент: описывает боли, спрашивает цены
+1. ПЕРЕВОД на русский (медицинский словарь):
+   буын=сустав, омыртқа=позвоночник, бел=поясница, тізе=колено, мойын=шея
+   ауырады=болит, қатты ауырады=сильно болит, дәрігер=врач, емхана=клиника
+   тексеру=обследование, операция=операция, рентген=рентген, МРТ=МРТ
+   
+2. ОПРЕДЕЛИ РОЛИ по смыслу:
+   АДМИНИСТРАТОР (manager):
+   - Приветствует: "Здравствуйте", "Клиника Мирамед", "Добрый день"
+   - Задаёт вопросы о боли: "Что беспокоит?", "Когда болит?", "Как проявляется?"
+   - Предлагает услуги: "Мы лечим", "У нас есть", "Консультация за"
+   - Предлагает запись: "Можете записаться", "Удобно завтра?"
+   
+   ПАЦИЕНТ (client):
+   - Описывает симптомы: "Болит колено", "Не могу ходить", "Ноги беспокоят"
+   - Рассказывает историю: "Делала рентген", "Врач сказал", "Ездила в санаторий"
+   - Задаёт вопросы: "Что делать?", "Это артроз?", "Сколько стоит?"
+   - Прощается: "Спасибо", "До свидания"
 
-ФОРМАТ — JSON массив:
-[{"role": "manager", "text": "..."}, {"role": "client", "text": "..."}]
+3. РАЗДЕЛИ на короткие реплики (1-3 предложения)
+4. ЧЕРЕДУЙ роли в правильном порядке
 
-Объединяй реплики одного спикера. Верни ТОЛЬКО JSON.
+ЗАПРЕТЫ:
+❌ НЕ объединяй весь текст одного человека в один блок
+❌ НЕ выдумывай фразы, которых нет
+❌ НЕ пропускай предложения
+❌ НЕ меняй смысл
+
+ПРИМЕР:
+Вход:
+[0:05] Сәлеметсіз бе клиника Мирамед қайырлы күн
+[0:12] Сәлем менің белім қатты ауырады
+[0:18] Қашан ауырады түнде ме немесе жүргенде
+[0:25] Жүргенде көп жүре алмаймын
+
+Выход:
+[
+  {"role": "manager", "text": "Здравствуйте, клиника Мирамед, добрый день."},
+  {"role": "client", "text": "Здравствуйте, у меня поясница сильно болит."},
+  {"role": "manager", "text": "Когда болит — ночью или при ходьбе?"},
+  {"role": "client", "text": "При ходьбе, не могу много ходить."}
+]
+
+ФОРМАТ — JSON массив. Без markdown.
 
 ТРАНСКРИПТ:
 ${segmentedText}`;
 
-  console.log('🧠 GPT-4o: translate + roles (mono fallback)...');
+  console.log('🧠 GPT-4o: translate + roles...');
   const response = await axios.post(GOOGLE_PROXY_URL, {
     type: 'chat', apiKey: OPENAI_API_KEY, model: 'gpt-4o', max_tokens: 4000,
     messages: [{ role: 'user', content: prompt }]
@@ -488,89 +659,61 @@ ${segmentedText}`;
     .filter(item => item.text && item.text.trim().length > 0)
     .map(item => ({ role: item.role === 'client' ? 'client' : 'manager', text: item.text.trim() }));
 
-  return mergeConsecutive(formatted);
+  return formatted;
 }
 
-function mergeConsecutive(formatted) {
-  if (!formatted.length) return [];
-  const merged = [{ ...formatted[0] }];
-  for (let i = 1; i < formatted.length; i++) {
-    const curr = formatted[i];
-    const last = merged[merged.length - 1];
-    if (curr.role === last.role) { last.text += ' ' + curr.text; }
-    else { merged.push({ ...curr }); }
-  }
-  return merged;
-}
 
 /**
  * ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ
+ * СТЕРЕО-РЕЖИМ с умной синхронизацией через GPT-4o
  */
 async function transcribeAudio(audioUrl) {
-  console.log('📥 Downloading audio...');
-  const audioResponse = await axios.get(audioUrl, {
-    responseType: 'arraybuffer', timeout: 120000,
-    headers: { 'User-Agent': 'Mozilla/5.0' }
-  });
-  const audioBuffer = Buffer.from(audioResponse.data);
-  console.log(`📦 Audio: ${audioBuffer.length} bytes`);
+  try {
+    console.log('📥 Downloading audio...');
+    const audioResponse = await axios.get(audioUrl, {
+      responseType: 'arraybuffer', timeout: 120000,
+      headers: { 'User-Agent': 'Mozilla/5.0' }
+    });
+    const audioBuffer = Buffer.from(audioResponse.data);
+    console.log(`📦 Audio: ${audioBuffer.length} bytes`);
 
-  // ===== СТЕРЕО ПУТЬ =====
-  if (FFMPEG_AVAILABLE) {
-    try {
-      const channels = splitStereoChannels(audioBuffer);
+    // СТЕРЕО РЕЖИМ
+    if (FFMPEG_AVAILABLE) {
+      try {
+        const channels = splitStereoChannels(audioBuffer);
 
-      if (channels) {
-        console.log('🔀 Стерео режим — раздельная транскрибация каналов');
+        if (channels) {
+          console.log('🔀 Стерео режим — раздельная транскрибация');
 
-        const [managerResult, clientResult] = await Promise.all([
-          whisperTranscribeChannel(channels.manager, 'администратор'),
-          whisperTranscribeChannel(channels.client, 'пациент')
-        ]);
+          const [managerResult, clientResult] = await Promise.all([
+            whisperTranscribeChannel(channels.manager, 'администратор'),
+            whisperTranscribeChannel(channels.client, 'пациент')
+          ]);
 
-        if (!managerResult.plainText && !clientResult.plainText) {
-          return { plain: '', formatted: [] };
+          if (!managerResult.plainText && !clientResult.plainText) {
+            return { plain: '', formatted: [] };
+          }
+
+          console.log(`✅ Whisper done: Manager ${managerResult.plainText.length}ch, Client ${clientResult.plainText.length}ch`);
+
+          // GPT-4o: Синхронизация + перевод
+          const formatted = await syncAndTranslateChannels(managerResult.plainText, clientResult.plainText);
+          const plainText = formatted.map(r => r.text).join(' ');
+
+          console.log(`✅ Стерео pipeline done: ${formatted.length} реплик`);
+          return { plain: plainText, formatted };
         }
-
-        let formatted = mergeChannelTranscripts(managerResult, clientResult);
-        console.log(`✅ Merged: ${formatted.length} реплик`);
-
-        const totalText = formatted.map(r => r.text).join(' ');
-        if (totalText.length < 15) {
-          return { plain: totalText, formatted };
-        }
-
-        // GPT-4o: ТОЛЬКО перевод, роли уже 100% точные
-        const translated = await translateDialogue(formatted);
-        const plainText = translated.map(r => r.text).join(' ');
-
-        console.log(`✅ Стерео pipeline done: ${translated.length} реплик`);
-        return { plain: plainText, formatted: translated };
+      } catch (e) {
+        console.error('⚠️ Stereo failed:', e.message);
       }
-    } catch (e) {
-      console.error('⚠️ Stereo failed, fallback to mono:', e.message);
     }
-  }
 
-  // ===== МОНО FALLBACK =====
-  console.log('📝 Моно режим');
+    // МОНО FALLBACK
+    console.log('📝 Моно режим');
+    const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, ' +
+      'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, 9900 тенге';
 
-  const whisperPrompt = 'Мирамед, клиника, диагностика, суставы, позвоночник, артроз, грыжа, ' +
-    'Сәлеметсіз бе, қайырлы күн, ауырады, дәрігер, емхана, 9900 тенге';
-
-  let plainText = '', segments = [];
-
-  if (GOOGLE_PROXY_URL) {
-    try {
-      const r = await axios.post(GOOGLE_PROXY_URL, {
-        type: 'transcribe', apiKey: OPENAI_API_KEY,
-        audio: audioBuffer.toString('base64'), prompt: whisperPrompt
-      }, { timeout: 180000 });
-      if (r.data.text) { plainText = r.data.text; segments = r.data.segments || []; }
-    } catch (e) { console.log('Proxy failed:', e.message); }
-  }
-
-  if (!plainText) {
+    console.log('🎤 Whisper direct...');
     const FormData = require('form-data');
     const fd = new FormData();
     fd.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
@@ -578,18 +721,31 @@ async function transcribeAudio(audioUrl) {
     fd.append('response_format', 'verbose_json');
     fd.append('timestamp_granularities[]', 'segment');
     fd.append('prompt', whisperPrompt);
+    
     const r = await axios.post('https://api.openai.com/v1/audio/transcriptions', fd, {
-      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() }, timeout: 180000
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() }, 
+      timeout: 180000
     });
-    plainText = r.data.text; segments = r.data.segments || [];
-  }
+    
+    const plainText = r.data.text || '';
+    const segments = r.data.segments || [];
 
-  if (plainText.length < 15) {
-    return { plain: plainText, formatted: [{ role: 'manager', text: plainText }] };
-  }
+    console.log(`✅ Whisper: ${plainText.length} chars, ${segments.length} segments`);
 
-  const formatted = await translateAndAssignRolesGPT(plainText, segments);
-  return { plain: formatted.map(r => r.text).join(' '), formatted };
+    if (plainText.length < 15) {
+      return { plain: plainText, formatted: [{ role: 'manager', text: plainText }] };
+    }
+
+    const formatted = await translateAndAssignRolesGPT(plainText, segments);
+    const finalPlain = formatted.map(r => r.text).join(' ');
+    
+    console.log(`✅ Mono pipeline done: ${formatted.length} реплик`);
+    return { plain: finalPlain, formatted };
+    
+  } catch (error) {
+    console.error('❌ Transcription error:', error.message);
+    throw new Error(`Ошибка транскрибации: ${error.message}`);
+  }
 }
 
 // ==================== ИИ АНАЛИЗ ====================
@@ -729,7 +885,7 @@ app.get('/api/whatsapp/analyses', (req, res) => res.json({ analyses: [], message
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(`🏥 CallMind v3 на порту ${PORT}`);
+  console.log(`🏥 CallMind v3.1 на порту ${PORT}`);
   console.log(`🔀 Pipeline: ${FFMPEG_AVAILABLE ? 'Stereo split → Whisper×2 → GPT-4o translate → GPT-4o analyze' : 'Mono: Whisper → GPT-4o (translate+roles) → GPT-4o analyze'}`);
   if (await loadTokensFromDb()) {
     setInterval(() => syncNewCalls().catch(console.error), 5 * 60 * 1000);
