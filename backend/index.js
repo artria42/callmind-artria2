@@ -302,19 +302,47 @@ async function whisperTranscribeChannel(audioBuffer, channelName) {
 
 /**
  * Объединяет транскрипты двух каналов в хронологический диалог по таймкодам
+ * Fallback: если сегментов нет (прокси не вернул), использует plainText целиком
  */
 function mergeChannelTranscripts(managerResult, clientResult) {
+  const managerSegs = managerResult.segments || [];
+  const clientSegs = clientResult.segments || [];
+
+  // Fallback: если сегментов нет — используем plainText как целые реплики
+  if (managerSegs.length === 0 && clientSegs.length === 0) {
+    console.log('⚠️ Нет сегментов — используем plainText');
+    const result = [];
+    if (managerResult.plainText?.trim()) {
+      result.push({ role: 'manager', text: managerResult.plainText.trim(), start: 0, end: 0 });
+    }
+    if (clientResult.plainText?.trim()) {
+      result.push({ role: 'client', text: clientResult.plainText.trim(), start: 0, end: 0 });
+    }
+    // Администратор обычно говорит первым
+    return result;
+  }
+
+  // Если у одного канала нет сегментов, но есть текст — добавляем как одну реплику
   const allSegments = [];
 
-  for (const seg of (managerResult.segments || [])) {
-    if (seg.text && seg.text.trim()) {
-      allSegments.push({ role: 'manager', text: seg.text.trim(), start: seg.start, end: seg.end });
+  if (managerSegs.length > 0) {
+    for (const seg of managerSegs) {
+      if (seg.text?.trim()) {
+        allSegments.push({ role: 'manager', text: seg.text.trim(), start: seg.start, end: seg.end });
+      }
     }
+  } else if (managerResult.plainText?.trim()) {
+    allSegments.push({ role: 'manager', text: managerResult.plainText.trim(), start: 0, end: 0 });
   }
-  for (const seg of (clientResult.segments || [])) {
-    if (seg.text && seg.text.trim()) {
-      allSegments.push({ role: 'client', text: seg.text.trim(), start: seg.start, end: seg.end });
+
+  if (clientSegs.length > 0) {
+    for (const seg of clientSegs) {
+      if (seg.text?.trim()) {
+        allSegments.push({ role: 'client', text: seg.text.trim(), start: seg.start, end: seg.end });
+      }
     }
+  } else if (clientResult.plainText?.trim()) {
+    allSegments.push({ role: 'client', text: clientResult.plainText.trim(), start: 0, end: 0 });
   }
 
   // Хронологическая сортировка
