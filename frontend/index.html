@@ -25,6 +25,21 @@
         .expandable.open{max-height:1000px}
         .expand-btn{cursor:pointer;user-select:none}
         .expand-btn:hover{background:#f1f5f9}
+
+        /* Мультиселект стили */
+        .multiselect-container{position:relative}
+        .multiselect-btn{width:100%;padding:10px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;text-align:left;cursor:pointer;font-size:14px;font-weight:500;color:#334155;display:flex;justify-content:space-between;align-items:center}
+        .multiselect-btn:hover{background:#f1f5f9}
+        .multiselect-dropdown{position:absolute;top:100%;left:0;right:0;margin-top:4px;background:white;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.1);z-index:50;display:none;max-height:300px;overflow-y:auto}
+        .multiselect-dropdown.active{display:block}
+        .multiselect-option{padding:10px 16px;cursor:pointer;display:flex;align-items:center;gap:8px}
+        .multiselect-option:hover{background:#f8fafc}
+        .multiselect-option input[type="checkbox"]{margin:0;width:16px;height:16px;cursor:pointer}
+
+        /* Date picker стили */
+        .date-range-container{display:none;margin-top:12px;padding:12px;background:#f8fafc;border-radius:12px;border:1px solid #e2e8f0}
+        .date-range-container.active{display:block}
+        .date-input{padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:14px;width:100%}
     </style>
 </head>
 <body class="bg-slate-50">
@@ -100,10 +115,20 @@
             <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
                 <div class="flex flex-col lg:flex-row gap-4">
                     <div class="flex-1">
-                        <label class="text-xs font-medium text-slate-500 mb-2 block">Администратор</label>
-                        <select id="filter-manager" onchange="applyFilters()" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700">
-                            <option value="all">Все администраторы</option>
-                        </select>
+                        <label class="text-xs font-medium text-slate-500 mb-2 block">Администраторы</label>
+                        <div class="multiselect-container">
+                            <button type="button" class="multiselect-btn" onclick="toggleMultiselect('dashboard')">
+                                <span id="dashboard-multiselect-label">Все администраторы</span>
+                                <i data-lucide="chevron-down" class="w-4 h-4"></i>
+                            </button>
+                            <div id="dashboard-multiselect-dropdown" class="multiselect-dropdown">
+                                <div class="multiselect-option border-b border-slate-100">
+                                    <input type="checkbox" id="dashboard-manager-all" value="all" onchange="toggleAllManagers('dashboard')" checked>
+                                    <label for="dashboard-manager-all" class="cursor-pointer">Все администраторы</label>
+                                </div>
+                                <div id="dashboard-managers-list"></div>
+                            </div>
+                        </div>
                     </div>
                     <div class="flex-1">
                         <label class="text-xs font-medium text-slate-500 mb-2 block">Период</label>
@@ -114,7 +139,20 @@
                             <option value="last_7_days">Последние 7 дней</option>
                             <option value="current_month">Текущий месяц</option>
                             <option value="last_30_days">Последние 30 дней</option>
+                            <option value="custom">Произвольный период</option>
                         </select>
+                        <div id="dashboard-date-range" class="date-range-container">
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="text-xs text-slate-500 mb-1 block">С</label>
+                                    <input type="date" id="dashboard-date-from" class="date-input" onchange="applyCustomDateRange('dashboard')">
+                                </div>
+                                <div>
+                                    <label class="text-xs text-slate-500 mb-1 block">По</label>
+                                    <input type="date" id="dashboard-date-to" class="date-input" onchange="applyCustomDateRange('dashboard')">
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -222,11 +260,48 @@
 
             <!-- Calls Filter -->
             <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100 space-y-4">
-                <div class="flex flex-wrap items-center gap-4">
-                    <span class="text-sm font-medium text-slate-600">Администратор:</span>
-                    <select id="calls-filter-manager" onchange="renderFilteredCalls()" class="px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm">
-                        <option value="all">Все</option>
-                    </select>
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <div>
+                        <label class="text-xs font-medium text-slate-500 mb-2 block">Администраторы</label>
+                        <div class="multiselect-container">
+                            <button type="button" class="multiselect-btn" onclick="toggleMultiselect('calls')">
+                                <span id="calls-multiselect-label">Все администраторы</span>
+                                <i data-lucide="chevron-down" class="w-4 h-4"></i>
+                            </button>
+                            <div id="calls-multiselect-dropdown" class="multiselect-dropdown">
+                                <div class="multiselect-option border-b border-slate-100">
+                                    <input type="checkbox" id="calls-manager-all" value="all" onchange="toggleAllManagers('calls')" checked>
+                                    <label for="calls-manager-all" class="cursor-pointer">Все администраторы</label>
+                                </div>
+                                <div id="calls-managers-list"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="text-xs font-medium text-slate-500 mb-2 block">Период</label>
+                        <select id="calls-filter-period" onchange="setCallsPeriod(this.value)" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700">
+                            <option value="all">Все время</option>
+                            <option value="today">Сегодня</option>
+                            <option value="yesterday">Вчера</option>
+                            <option value="current_week" selected>Текущая неделя</option>
+                            <option value="last_7_days">Последние 7 дней</option>
+                            <option value="current_month">Текущий месяц</option>
+                            <option value="last_30_days">Последние 30 дней</option>
+                            <option value="custom">Произвольный период</option>
+                        </select>
+                        <div id="calls-date-range" class="date-range-container">
+                            <div class="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label class="text-xs text-slate-500 mb-1 block">С</label>
+                                    <input type="date" id="calls-date-from" class="date-input" onchange="applyCustomDateRange('calls')">
+                                </div>
+                                <div>
+                                    <label class="text-xs text-slate-500 mb-1 block">По</label>
+                                    <input type="date" id="calls-date-to" class="date-input" onchange="applyCustomDateRange('calls')">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
                 <div class="flex flex-wrap gap-2">
                     <button onclick="setCallsFilter('all')" id="filter-all" class="filter-btn px-4 py-2 rounded-lg text-sm font-medium active">Все звонки</button>
@@ -264,6 +339,35 @@
             <div>
                 <h1 class="text-2xl font-bold text-slate-800">Рейтинг команды</h1>
                 <p class="text-slate-500 text-sm">Ранжирование администраторов по качеству</p>
+            </div>
+
+            <!-- Team Filters -->
+            <div class="bg-white rounded-2xl p-4 shadow-sm border border-slate-100">
+                <div class="flex-1 max-w-md">
+                    <label class="text-xs font-medium text-slate-500 mb-2 block">Период</label>
+                    <select id="team-filter-period" onchange="setTeamPeriod(this.value)" class="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium text-slate-700">
+                        <option value="all">Все время</option>
+                        <option value="today">Сегодня</option>
+                        <option value="yesterday">Вчера</option>
+                        <option value="current_week" selected>Текущая неделя</option>
+                        <option value="last_7_days">Последние 7 дней</option>
+                        <option value="current_month">Текущий месяц</option>
+                        <option value="last_30_days">Последние 30 дней</option>
+                        <option value="custom">Произвольный период</option>
+                    </select>
+                    <div id="team-date-range" class="date-range-container">
+                        <div class="grid grid-cols-2 gap-3">
+                            <div>
+                                <label class="text-xs text-slate-500 mb-1 block">С</label>
+                                <input type="date" id="team-date-from" class="date-input" onchange="applyCustomDateRange('team')">
+                            </div>
+                            <div>
+                                <label class="text-xs text-slate-500 mb-1 block">По</label>
+                                <input type="date" id="team-date-to" class="date-input" onchange="applyCustomDateRange('team')">
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
@@ -345,21 +449,146 @@ lucide.createIcons();
 let allCalls = [];
 let allManagers = [];
 let currentPeriod = 'current_week';
-let currentManager = 'all';
+let currentManagers = []; // Массив выбранных менеджеров (пусто = все)
 let currentCallsFilter = 'all';
+let currentCallsPeriod = 'current_week';
+let currentCallsManagers = []; // Массив для страницы Calls
+let currentTeamPeriod = 'current_week';
+let customDateRange = { dashboard: null, calls: null, team: null }; // Кастомные даты
 
 // ==================== FILTERS ====================
 
 function setPeriod(period) {
     currentPeriod = period;
-    applyFilters();
+    const dateRange = document.getElementById('dashboard-date-range');
+    if (period === 'custom') {
+        dateRange.classList.add('active');
+    } else {
+        dateRange.classList.remove('active');
+        customDateRange.dashboard = null;
+        applyFilters();
+    }
 }
 
-function getDateRange(period) {
+function setCallsPeriod(period) {
+    currentCallsPeriod = period;
+    const dateRange = document.getElementById('calls-date-range');
+    if (period === 'custom') {
+        dateRange.classList.add('active');
+    } else {
+        dateRange.classList.remove('active');
+        customDateRange.calls = null;
+        renderFilteredCalls();
+    }
+}
+
+function setTeamPeriod(period) {
+    currentTeamPeriod = period;
+    const dateRange = document.getElementById('team-date-range');
+    if (period === 'custom') {
+        dateRange.classList.add('active');
+    } else {
+        dateRange.classList.remove('active');
+        customDateRange.team = null;
+        renderTeam();
+    }
+}
+
+function applyCustomDateRange(context) {
+    const fromInput = document.getElementById(`${context}-date-from`);
+    const toInput = document.getElementById(`${context}-date-to`);
+
+    if (fromInput.value && toInput.value) {
+        customDateRange[context] = {
+            startDate: new Date(fromInput.value + 'T00:00:00'),
+            endDate: new Date(toInput.value + 'T23:59:59')
+        };
+
+        if (context === 'dashboard') {
+            applyFilters();
+        } else if (context === 'calls') {
+            renderFilteredCalls();
+        } else if (context === 'team') {
+            renderTeam();
+        }
+    }
+}
+
+function toggleMultiselect(context) {
+    const dropdown = document.getElementById(`${context}-multiselect-dropdown`);
+    dropdown.classList.toggle('active');
+    lucide.createIcons();
+}
+
+function toggleAllManagers(context) {
+    const allCheckbox = document.getElementById(`${context}-manager-all`);
+    const managerCheckboxes = document.querySelectorAll(`#${context}-managers-list input[type="checkbox"]`);
+
+    managerCheckboxes.forEach(cb => {
+        cb.checked = allCheckbox.checked;
+    });
+
+    updateManagerSelection(context);
+}
+
+function updateManagerSelection(context) {
+    const allCheckbox = document.getElementById(`${context}-manager-all`);
+    const managerCheckboxes = Array.from(document.querySelectorAll(`#${context}-managers-list input[type="checkbox"]`));
+    const label = document.getElementById(`${context}-multiselect-label`);
+
+    const selected = managerCheckboxes.filter(cb => cb.checked);
+    const selectedIds = selected.map(cb => parseInt(cb.value));
+
+    // Обновляем массив выбранных менеджеров
+    if (context === 'dashboard') {
+        currentManagers = selectedIds;
+    } else if (context === 'calls') {
+        currentCallsManagers = selectedIds;
+    }
+
+    // Обновляем чекбокс "Все"
+    allCheckbox.checked = selected.length === managerCheckboxes.length;
+
+    // Обновляем текст
+    if (selected.length === 0 || selected.length === managerCheckboxes.length) {
+        label.textContent = 'Все администраторы';
+        if (context === 'dashboard') currentManagers = [];
+        if (context === 'calls') currentCallsManagers = [];
+    } else if (selected.length === 1) {
+        label.textContent = selected[0].nextElementSibling.textContent;
+    } else {
+        label.textContent = `Выбрано: ${selected.length}`;
+    }
+
+    // Применяем фильтры
+    if (context === 'dashboard') {
+        applyFilters();
+    } else if (context === 'calls') {
+        renderFilteredCalls();
+    }
+}
+
+// Закрытие dropdown при клике вне его
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.multiselect-container')) {
+        document.querySelectorAll('.multiselect-dropdown').forEach(d => d.classList.remove('active'));
+    }
+});
+
+function getDateRange(period, context = 'dashboard') {
+    // Если выбран кастомный период и даты заданы
+    if (period === 'custom' && customDateRange[context]) {
+        return customDateRange[context];
+    }
+
+    if (period === 'all') {
+        return null; // Показать все
+    }
+
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     let startDate, endDate;
-    
+
     switch(period) {
         case 'today':
             startDate = today;
@@ -396,24 +625,25 @@ function getDateRange(period) {
 
 function getFilteredCalls() {
     let filtered = [...allCalls];
-    
-    if (currentManager !== 'all') {
-        filtered = filtered.filter(c => c.manager_id === parseInt(currentManager));
+
+    // Фильтр по менеджерам (если массив не пустой)
+    if (currentManagers.length > 0) {
+        filtered = filtered.filter(c => currentManagers.includes(c.manager_id));
     }
-    
-    const range = getDateRange(currentPeriod);
+
+    // Фильтр по дате
+    const range = getDateRange(currentPeriod, 'dashboard');
     if (range) {
         filtered = filtered.filter(c => {
             const callDate = new Date(c.call_date);
             return callDate >= range.startDate && callDate <= range.endDate;
         });
     }
-    
+
     return filtered;
 }
 
 function applyFilters() {
-    currentManager = document.getElementById('filter-manager').value;
     renderDashboard();
 }
 
@@ -434,17 +664,30 @@ async function loadManagers() {
     try {
         const res = await fetch(`${API_URL}/api/managers`);
         allManagers = await res.json();
-        
-        const select = document.getElementById('filter-manager');
-        const callsSelect = document.getElementById('calls-filter-manager');
-        
-        const options = '<option value="all">Все администраторы</option>' + 
-            allManagers.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
-        
-        select.innerHTML = options;
-        if (callsSelect) callsSelect.innerHTML = options;
-        
+
+        // Заполняем мультиселект для Dashboard
+        const dashboardList = document.getElementById('dashboard-managers-list');
+        const callsList = document.getElementById('calls-managers-list');
+
+        const checkboxes = allManagers.map(m => `
+            <div class="multiselect-option">
+                <input type="checkbox" id="dashboard-manager-${m.id}" value="${m.id}" onchange="updateManagerSelection('dashboard')" checked>
+                <label for="dashboard-manager-${m.id}" class="cursor-pointer flex-1">${m.name}</label>
+            </div>
+        `).join('');
+
+        const callsCheckboxes = allManagers.map(m => `
+            <div class="multiselect-option">
+                <input type="checkbox" id="calls-manager-${m.id}" value="${m.id}" onchange="updateManagerSelection('calls')" checked>
+                <label for="calls-manager-${m.id}" class="cursor-pointer flex-1">${m.name}</label>
+            </div>
+        `).join('');
+
+        if (dashboardList) dashboardList.innerHTML = checkboxes;
+        if (callsList) callsList.innerHTML = callsCheckboxes;
+
         renderTeam();
+        lucide.createIcons();
     } catch (e) {
         console.error('Error loading managers:', e);
     }
@@ -659,12 +902,22 @@ function setCallsFilter(filter) {
 
 function renderFilteredCalls() {
     let filtered = [...allCalls];
-    
-    const selectedManager = document.getElementById('calls-filter-manager')?.value || 'all';
-    if (selectedManager !== 'all') {
-        filtered = filtered.filter(c => c.manager_id === parseInt(selectedManager));
+
+    // Фильтр по менеджерам
+    if (currentCallsManagers.length > 0) {
+        filtered = filtered.filter(c => currentCallsManagers.includes(c.manager_id));
     }
-    
+
+    // Фильтр по дате
+    const range = getDateRange(currentCallsPeriod, 'calls');
+    if (range) {
+        filtered = filtered.filter(c => {
+            const callDate = new Date(c.call_date);
+            return callDate >= range.startDate && callDate <= range.endDate;
+        });
+    }
+
+    // Фильтр по типу звонка
     if (currentCallsFilter === 'problem') {
         filtered = filtered.filter(c => c.scores && c.scores.total_score < 60);
     } else if (currentCallsFilter === 'success') {
@@ -672,7 +925,7 @@ function renderFilteredCalls() {
     } else if (currentCallsFilter === 'unanalyzed') {
         filtered = filtered.filter(c => !c.scores && c.audio_url);
     }
-    
+
     renderCallsTable(filtered);
 }
 
@@ -728,21 +981,31 @@ function renderCallsTable(calls) {
 
 function renderTeam() {
     const tbody = document.getElementById('ranking-table');
-    
+
+    // Фильтрация звонков по периоду
+    let filteredCalls = [...allCalls];
+    const range = getDateRange(currentTeamPeriod, 'team');
+    if (range) {
+        filteredCalls = filteredCalls.filter(c => {
+            const callDate = new Date(c.call_date);
+            return callDate >= range.startDate && callDate <= range.endDate;
+        });
+    }
+
     const stats = allManagers.map(m => {
-        const calls = allCalls.filter(c => c.manager_id === m.id);
+        const calls = filteredCalls.filter(c => c.manager_id === m.id);
         const analyzed = calls.filter(c => c.scores);
         const avgScore = analyzed.length ? Math.round(analyzed.reduce((s, c) => s + (c.scores?.total_score || 0), 0) / analyzed.length) : null;
         const successful = analyzed.filter(c => c.scores?.total_score >= 80).length;
         return { ...m, totalCalls: calls.length, analyzedCalls: analyzed.length, avgScore, successful };
     }).sort((a, b) => (b.avgScore || 0) - (a.avgScore || 0));
-    
+
     const medals = ['🥇', '🥈', '🥉'];
-    
+
     tbody.innerHTML = stats.map((m, i) => {
         const medal = m.avgScore && i < 3 ? medals[i] : '';
         const scoreColor = m.avgScore >= 80 ? 'text-emerald-600' : m.avgScore >= 60 ? 'text-amber-600' : m.avgScore ? 'text-red-600' : 'text-slate-400';
-        
+
         return `
             <tr class="hover:bg-slate-50">
                 <td class="px-4 py-4"><span class="text-lg font-bold text-slate-400">${medal || (i + 1)}</span></td>
