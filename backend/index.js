@@ -321,6 +321,12 @@ async function syncNewCalls() {
       SORT: 'CALL_START_DATE', ORDER: 'DESC'
     });
     for (const call of calls || []) {
+      // ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: все поля звонка из Bitrix24
+      logger.info('📞 Bitrix24 call data (все поля):', {
+        callId: call.ID,
+        allFields: call
+      });
+
       const { data: existing } = await supabase.from('calls').select('id, audio_url').eq('bitrix_call_id', call.ID).single();
       if (existing) {
         if (!existing.audio_url && call.CALL_RECORD_URL) {
