@@ -445,24 +445,28 @@ function splitStereoChannels(audioBuffer) {
 }
 
 /**
- * gpt-4o-transcribe: транскрибация одного канала
+ * gpt-4o-transcribe: транскрибация одного канала с автоопределением языка
  *
  * Почему НЕ whisper-1:
  * - whisper-1 на казахском выдаёт "Аллаға сауын атып" вместо "Алло"
  * - gpt-4o-transcribe имеет WER на 7% ниже на казахском
  * - Лучше понимает code-switching (каз+рус в одном предложении)
  *
+ * Автоопределение языка (без параметра language):
+ * - Работает для русских, казахских и смешанных звонков
+ * - Форсирование language='kk' вызывало галлюцинации на русских звонках
+ *
  * Формат: json (text only) — segments недоступны в gpt-4o-transcribe
  */
 async function transcribeChannel(audioBuffer, channelName) {
-  logger.info(`🎤 gpt-4o-transcribe [${channelName}] → OpenAI (language=kk)...`);
+  logger.info(`🎤 gpt-4o-transcribe [${channelName}] → OpenAI (auto language detection)...`);
 
   const FormData = require('form-data');
   const formData = new FormData();
   // WAV лучше чем MP3 для точности распознавания
   formData.append('file', audioBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
   formData.append('model', 'gpt-4o-transcribe');
-  formData.append('language', 'kk');
+  // НЕ указываем language — gpt-4o-transcribe сам определит (ru/kk/mix)
   formData.append('response_format', 'json');
   formData.append('prompt', WHISPER_PROMPT_KK);
 
@@ -772,11 +776,11 @@ async function transcribeAudio(audioUrl) {
     const fd = new FormData();
     fd.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
     fd.append('model', 'gpt-4o-transcribe');
-    fd.append('language', 'kk');
+    // НЕ указываем language — gpt-4o-transcribe сам определит (ru/kk/mix)
     fd.append('response_format', 'json');
     fd.append('prompt', WHISPER_PROMPT_KK);
 
-    logger.info('🎤 gpt-4o-transcribe (mono, kk)...');
+    logger.info('🎤 gpt-4o-transcribe (mono, auto language)...');
 
     // Используем retry логику для надежности
     const r = await callWithRetry(
