@@ -31,7 +31,7 @@ Clinic CallMind AI v5.0 - An AI-powered call analytics system for Miramed clinic
 ```
 Bitrix24 Call → Webhook → Backend Sync → Audio Download
 → Stereo Split (ffmpeg) → gpt-4o-transcribe (×2 channels)
-→ GPT-4o Translation + Dialogue Reconstruction → GPT-4o Analysis → Supabase Storage
+→ GPT-4o Literal Translation (2 blocks) → GPT-4o Analysis → Supabase Storage
 → Frontend Display
 ```
 
@@ -114,7 +114,7 @@ docker run -p 3000:3000 --env-file .env callmind
 - Better handling of code-switching (Kazakh+Russian in same sentence)
 - Limitation: No `verbose_json` or segments support (only `json` and `text`)
 
-**Dialogue Reconstruction Format v5.1**: GPT-4o reconstructs turn-by-turn dialogue from two separate audio channels, returning an array of utterances with roles (manager/client). GPT-4o infers the logical order of utterances based on question-answer patterns and conversational context, then translates each utterance to Russian.
+**Two-Block Output Format v5.2**: GPT-4o translates each audio channel LITERALLY to Russian without attempting to reconstruct turn-by-turn dialogue. Returns two text blocks (manager + client) formatted with paragraphs for readability. This approach prioritizes translation accuracy over dialogue reconstruction, as reconstructing turn order without timestamps leads to GPT hallucinating details.
 
 **Whisper Prompt** (lines 48-56):
 - NOT instructions but "prior context" - Whisper continues this style
