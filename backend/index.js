@@ -6,12 +6,110 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const winston = require('winston');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
+// ==================== ЛОГИРОВАНИЕ ====================
+// Структурированное логирование с Winston
+const logger = winston.createLogger({
+  level: process.env.LOG_LEVEL || 'info',
+  format: winston.format.combine(
+    winston.format.timestamp(),
+    winston.format.errors({ stack: true }),
+    winston.format.json()
+  ),
+  transports: [
+    // Ошибки в отдельный файл
+    new winston.transports.File({
+      filename: 'logs/error.log',
+      level: 'error',
+      maxsize: 5242880, // 5MB
+      maxFiles: 5
+    }),
+    // Все логи
+    new winston.transports.File({
+      filename: 'logs/combined.log',
+      maxsize: 5242880,
+      maxFiles: 5
+    }),
+    // Консоль для Railway
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.simple()
+      )
+    })
+  ]
+});
+
+// Создаем папку для логов если её нет
+if (!fs.existsSync('logs')) {
+  fs.mkdirSync('logs');
+}
+
+// ==================== RETRY ЛОГИКА ====================
+/**
+ * Retry функция с exponential backoff для OpenAI API
+ * @param {Function} requestFn - Функция запроса к API
+ * @param {Number} maxRetries - Максимальное количество попыток
+ * @param {String} operationName - Название операции для логов
+ */
+async function callWithRetry(requestFn, maxRetries = 3, operationName = 'API call') {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await requestFn();
+    } catch (error) {
+      // Определяем можно ли повторить запрос
+      const isRetryable =
+        error.code === 'ECONNABORTED' || // Timeout
+        error.code === 'ENOTFOUND' ||    // DNS
+        error.response?.status === 429 || // Rate limit
+        error.response?.status >= 500;    // Server error
+
+      const isLastAttempt = attempt === maxRetries;
+
+      if (!isRetryable || isLastAttempt) {
+        logger.error(`❌ ${operationName} failed after ${attempt} attempts`, {
+          error: error.message,
+          status: error.response?.status,
+          attempt
+        });
+        throw error;
+      }
+
+      // Exponential backoff: 1s, 2s, 4s, 8s...
+      const delayMs = Math.min(Math.pow(2, attempt - 1) * 1000, 10000);
+      logger.warn(`⚠️ ${operationName} failed, retry ${attempt}/${maxRetries} через ${delayMs}ms`, {
+        error: error.message,
+        status: error.response?.status
+      });
+
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
 const app = express();
+
+// ==================== RATE LIMITING ====================
+// Защита от DDoS и перерасхода OpenAI API
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 минут
+  max: 100, // Максимум 100 запросов с одного IP
+  message: { error: 'Слишком много запросов, попробуйте позже' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    logger.warn('Rate limit exceeded', { ip: req.ip, path: req.path });
+    res.status(429).json({ error: 'Слишком много запросов, попробуйте позже' });
+  }
+});
+
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/api/', apiLimiter);
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -31,9 +129,9 @@ let FFMPEG_AVAILABLE = false;
 try {
   execSync('ffmpeg -version', { stdio: 'ignore' });
   FFMPEG_AVAILABLE = true;
-  console.log('✅ ffmpeg найден');
+  logger.info('✅ ffmpeg найден');
 } catch (e) {
-  console.log('⚠️ ffmpeg не найден — разделение каналов недоступно, будет fallback на GPT-4o');
+  logger.warn('⚠️ ffmpeg не найден — разделение каналов недоступно, будет fallback на GPT-4o');
 }
 
 // ====================================================================
@@ -64,8 +162,9 @@ async function saveTokensToDb() {
       value: JSON.stringify(bitrixTokens),
       updated_at: new Date().toISOString()
     }, { onConflict: 'key' });
+    logger.debug('Bitrix tokens saved to DB');
   } catch (e) {
-    console.error('Error saving tokens:', e.message);
+    logger.error('Error saving tokens', { error: e.message });
   }
 }
 
@@ -83,14 +182,49 @@ async function loadTokensFromDb() {
 // ==================== ROUTES ====================
 
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+  res.json({
+    status: 'ok',
     message: '🏥 Clinic CallMind API v5.0',
     features: ['bitrix', 'ai-analysis', 'stereo-channel-split', 'gpt-4o-transcribe', 'two-block-format'],
     ffmpeg: FFMPEG_AVAILABLE,
     bitrix_connected: !!bitrixTokens.access_token
   });
 });
+
+// ==================== HEALTH CHECK ====================
+// Endpoint для мониторинга и keep-alive от Railway
+app.get('/health', (req, res) => {
+  const healthStatus = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: Math.floor(process.uptime()),
+    uptimeFormatted: formatUptime(process.uptime()),
+    memory: {
+      used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
+      unit: 'MB'
+    },
+    services: {
+      bitrix: !!bitrixTokens.access_token,
+      ffmpeg: FFMPEG_AVAILABLE,
+      supabase: true, // Проверяем что подключение есть
+      openai: !!process.env.OPENAI_API_KEY
+    },
+    environment: process.env.NODE_ENV || 'development'
+  };
+
+  logger.info('Health check', healthStatus);
+  res.json(healthStatus);
+});
+
+// Форматирование uptime в читаемый вид
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = Math.floor(seconds % 60);
+  return `${days}d ${hours}h ${minutes}m ${secs}s`;
+}
 
 app.get('/api/bitrix/auth', (req, res) => {
   res.json({ auth_url: `https://${BITRIX_DOMAIN}/oauth/authorize/?client_id=${BITRIX_CLIENT_ID}&response_type=code` });
@@ -188,9 +322,15 @@ async function syncNewCalls() {
         audio_url: call.CALL_RECORD_URL || null,
         crm_link: call.CRM_ENTITY_ID ? `https://${BITRIX_DOMAIN}/crm/${(call.CRM_ENTITY_TYPE || 'contact').toLowerCase()}/details/${call.CRM_ENTITY_ID}/` : null
       }).select().single();
-      if (newCall?.audio_url) analyzeCallById(newCall.id).catch(e => console.error(e.message));
+      if (newCall?.audio_url) {
+        analyzeCallById(newCall.id).catch(e => {
+          logger.error('Auto-analysis failed', { callId: newCall.id, error: e.message });
+        });
+      }
     }
-  } catch (e) { console.error('Sync error:', e.message); }
+  } catch (e) {
+    logger.error('Sync error', { error: e.message, stack: e.stack });
+  }
 }
 
 app.get('/api/bitrix/calls', async (req, res) => {
@@ -266,7 +406,7 @@ function splitStereoChannels(audioBuffer) {
     const channels = audioStream?.channels || 1;
 
     if (channels < 2) {
-      console.log('⚠️ Аудио моно — разделение невозможно');
+      logger.warn('⚠️ Аудио моно — разделение невозможно', { channels });
       return null;
     }
 
@@ -277,7 +417,10 @@ function splitStereoChannels(audioBuffer) {
     const leftBuffer = fs.readFileSync(leftPath);
     const rightBuffer = fs.readFileSync(rightPath);
 
-    console.log(`✅ Каналы разделены (WAV 16kHz): L(пациент)=${leftBuffer.length}b, R(админ)=${rightBuffer.length}b`);
+    logger.info(`✅ Каналы разделены (WAV 16kHz)`, {
+      clientSize: leftBuffer.length,
+      managerSize: rightBuffer.length
+    });
     return { client: leftBuffer, manager: rightBuffer };
   } finally {
     try { fs.unlinkSync(inputPath); } catch (e) {}
@@ -297,7 +440,7 @@ function splitStereoChannels(audioBuffer) {
  * Формат: json (text only) — segments недоступны в gpt-4o-transcribe
  */
 async function transcribeChannel(audioBuffer, channelName) {
-  console.log(`🎤 gpt-4o-transcribe [${channelName}] → OpenAI (language=kk)...`);
+  logger.info(`🎤 gpt-4o-transcribe [${channelName}] → OpenAI (language=kk)...`);
 
   const FormData = require('form-data');
   const formData = new FormData();
@@ -308,13 +451,18 @@ async function transcribeChannel(audioBuffer, channelName) {
   formData.append('response_format', 'json');
   formData.append('prompt', WHISPER_PROMPT_KK);
 
-  const response = await axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
-    headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
-    timeout: 180000
-  });
+  // Используем retry логику для надежности
+  const response = await callWithRetry(
+    () => axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
+      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
+      timeout: 300000 // Увеличено до 5 минут для длинных записей
+    }),
+    3, // 3 попытки
+    `transcribeChannel[${channelName}]`
+  );
 
   const text = (response.data.text || '').trim();
-  console.log(`✅ gpt-4o-transcribe [${channelName}]: ${text.length} chars`);
+  logger.info(`✅ gpt-4o-transcribe [${channelName}]: ${text.length} chars`);
   return text;
 }
 
@@ -325,12 +473,12 @@ async function transcribeChannel(audioBuffer, channelName) {
  * НЕ пытаемся нарезать на реплики — это ненадёжно на мусорном входе
  */
 async function repairAndTranslate(adminRawText, clientRawText) {
-  console.log('\n' + '='.repeat(60));
-  console.log('📝 СЫРОЙ ТЕКСТ ОТ gpt-4o-transcribe (до перевода):');
-  console.log('='.repeat(60));
-  console.log('\n[АДМИН]:', adminRawText.substring(0, 500));
-  console.log('\n[ПАЦИЕНТ]:', clientRawText.substring(0, 500));
-  console.log('='.repeat(60) + '\n');
+  logger.info('📝 СЫРОЙ ТЕКСТ ОТ gpt-4o-transcribe (до перевода)', {
+    adminLength: adminRawText.length,
+    clientLength: clientRawText.length,
+    adminPreview: adminRawText.substring(0, 200),
+    clientPreview: clientRawText.substring(0, 200)
+  });
 
   if (!adminRawText.trim() && !clientRawText.trim()) {
     return { manager: '', client: '' };
@@ -376,19 +524,24 @@ ${adminRawText}
 КАНАЛ ПАЦИЕНТА (сырой):
 ${clientRawText}`;
 
-  console.log('🧠 GPT-4o: перевод двух каналов...');
+  logger.info('🧠 GPT-4o: перевод двух каналов...');
 
-  const response = await axios.post(GOOGLE_PROXY_URL, {
-    type: 'chat',
-    apiKey: OPENAI_API_KEY,
-    model: 'gpt-4o',
-    max_tokens: 4000,
-    temperature: 0,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ]
-  }, { timeout: 120000 });
+  // Используем retry логику для надежности
+  const response = await callWithRetry(
+    () => axios.post(GOOGLE_PROXY_URL, {
+      type: 'chat',
+      apiKey: OPENAI_API_KEY,
+      model: 'gpt-4o',
+      max_tokens: 4000,
+      temperature: 0,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ]
+    }, { timeout: 180000 }), // Увеличено до 3 минут
+    3,
+    'repairAndTranslate'
+  );
 
   const content = response.data.choices[0].message.content.trim();
   let result;
@@ -400,7 +553,9 @@ ${clientRawText}`;
     if (match) {
       result = JSON.parse(match[0]);
     } else {
-      console.error('⚠️ GPT не вернул JSON, fallback');
+      logger.warn('⚠️ GPT не вернул JSON, fallback', {
+        contentPreview: content.substring(0, 200)
+      });
       result = { manager: adminRawText, client: clientRawText };
     }
   }
@@ -408,7 +563,10 @@ ${clientRawText}`;
   const managerText = (result.manager || result.admin || '').trim();
   const clientText = (result.client || result.patient || '').trim();
 
-  console.log(`✅ Перевод done: manager=${managerText.length}ch, client=${clientText.length}ch`);
+  logger.info(`✅ Перевод done`, {
+    managerLength: managerText.length,
+    clientLength: clientText.length
+  });
   return { manager: managerText, client: clientText };
 }
 
@@ -448,19 +606,24 @@ async function repairAndTranslateMono(rawText) {
   "client": "Всё что сказал пациент, одним блоком"
 }`;
 
-  console.log('🧠 GPT-4o: перевод моно...');
+  logger.info('🧠 GPT-4o: перевод моно...');
 
-  const response = await axios.post(GOOGLE_PROXY_URL, {
-    type: 'chat',
-    apiKey: OPENAI_API_KEY,
-    model: 'gpt-4o',
-    max_tokens: 4000,
-    temperature: 0,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: `ТРАНСКРИПТ:\n${rawText}` }
-    ]
-  }, { timeout: 120000 });
+  // Используем retry логику для надежности
+  const response = await callWithRetry(
+    () => axios.post(GOOGLE_PROXY_URL, {
+      type: 'chat',
+      apiKey: OPENAI_API_KEY,
+      model: 'gpt-4o',
+      max_tokens: 4000,
+      temperature: 0,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `ТРАНСКРИПТ:\n${rawText}` }
+      ]
+    }, { timeout: 180000 }), // Увеличено до 3 минут
+    3,
+    'repairAndTranslateMono'
+  );
 
   const content = response.data.choices[0].message.content.trim();
   let result;
@@ -488,13 +651,14 @@ async function repairAndTranslateMono(rawText) {
 
 async function transcribeAudio(audioUrl) {
   try {
-    console.log('📥 Downloading audio...');
+    logger.info('📥 Downloading audio...', { url: audioUrl });
     const audioResponse = await axios.get(audioUrl, {
-      responseType: 'arraybuffer', timeout: 120000,
+      responseType: 'arraybuffer',
+      timeout: 180000, // Увеличено до 3 минут
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     const audioBuffer = Buffer.from(audioResponse.data);
-    console.log(`📦 Audio: ${audioBuffer.length} bytes`);
+    logger.info(`📦 Audio downloaded`, { size: audioBuffer.length });
 
     // ========== СТЕРЕО РЕЖИМ (основной) ==========
     if (FFMPEG_AVAILABLE) {
@@ -502,7 +666,7 @@ async function transcribeAudio(audioUrl) {
         const channels = splitStereoChannels(audioBuffer);
 
         if (channels) {
-          console.log('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов');
+          logger.info('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов');
 
           // Параллельная транскрибация
           const [managerRaw, clientRaw] = await Promise.all([
@@ -514,7 +678,10 @@ async function transcribeAudio(audioUrl) {
             return { plain: '', formatted: [] };
           }
 
-          console.log(`✅ Transcribe done: Manager ${managerRaw.length}ch, Client ${clientRaw.length}ch`);
+          logger.info(`✅ Transcribe done`, {
+            managerLength: managerRaw.length,
+            clientLength: clientRaw.length
+          });
 
           // GPT-4o: перевод → два полотна текста
           const translated = await repairAndTranslate(managerRaw, clientRaw);
@@ -524,16 +691,16 @@ async function transcribeAudio(audioUrl) {
           if (translated.client) formatted.push({ role: 'client', text: translated.client });
 
           const plainText = formatted.map(r => r.text).join(' ');
-          console.log(`✅ Стерео pipeline v5.0 done: ${formatted.length} блоков`);
+          logger.info(`✅ Стерео pipeline v5.0 done`, { blocks: formatted.length });
           return { plain: plainText, formatted };
         }
       } catch (e) {
-        console.error('⚠️ Stereo failed, falling back to mono:', e.message);
+        logger.warn('⚠️ Stereo failed, falling back to mono', { error: e.message });
       }
     }
 
     // ========== МОНО FALLBACK ==========
-    console.log('📝 Моно режим — gpt-4o-transcribe');
+    logger.info('📝 Моно режим — gpt-4o-transcribe');
 
     const FormData = require('form-data');
     const fd = new FormData();
@@ -543,14 +710,20 @@ async function transcribeAudio(audioUrl) {
     fd.append('response_format', 'json');
     fd.append('prompt', WHISPER_PROMPT_KK);
 
-    console.log('🎤 gpt-4o-transcribe (mono, kk)...');
-    const r = await axios.post('https://api.openai.com/v1/audio/transcriptions', fd, {
-      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() },
-      timeout: 180000
-    });
+    logger.info('🎤 gpt-4o-transcribe (mono, kk)...');
+
+    // Используем retry логику для надежности
+    const r = await callWithRetry(
+      () => axios.post('https://api.openai.com/v1/audio/transcriptions', fd, {
+        headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() },
+        timeout: 300000 // Увеличено до 5 минут
+      }),
+      3,
+      'transcribeAudio[mono]'
+    );
 
     const rawText = (r.data.text || '').trim();
-    console.log(`✅ Mono transcribe: ${rawText.length} chars`);
+    logger.info(`✅ Mono transcribe done`, { textLength: rawText.length });
 
     if (rawText.length < 15) {
       return { plain: rawText, formatted: [{ role: 'manager', text: rawText }] };
@@ -564,11 +737,15 @@ async function transcribeAudio(audioUrl) {
     if (translated.client) formatted.push({ role: 'client', text: translated.client });
 
     const finalPlain = formatted.map(r => r.text).join(' ');
-    console.log(`✅ Mono pipeline v5.0 done: ${formatted.length} блоков`);
+    logger.info(`✅ Mono pipeline v5.0 done`, { blocks: formatted.length });
     return { plain: finalPlain, formatted };
 
   } catch (error) {
-    console.error('❌ Transcription error:', error.message);
+    logger.error('❌ Transcription error', {
+      error: error.message,
+      stack: error.stack,
+      audioUrl
+    });
     throw new Error(`Ошибка транскрибации: ${error.message}`);
   }
 }
@@ -721,18 +898,24 @@ ${dialogText}
   "is_successful": true/false
 }`;
 
-  console.log('🤖 GPT-4o: analyzing with full script reference...');
-  const response = await axios.post(GOOGLE_PROXY_URL, {
-    type: 'chat',
-    apiKey: OPENAI_API_KEY,
-    model: 'gpt-4o',
-    max_tokens: 3000,
-    temperature: 0,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ]
-  }, { timeout: 120000 });
+  logger.info('🤖 GPT-4o: analyzing with full script reference...');
+
+  // Используем retry логику для надежности
+  const response = await callWithRetry(
+    () => axios.post(GOOGLE_PROXY_URL, {
+      type: 'chat',
+      apiKey: OPENAI_API_KEY,
+      model: 'gpt-4o',
+      max_tokens: 3000,
+      temperature: 0,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ]
+    }, { timeout: 180000 }), // Увеличено до 3 минут
+    3,
+    'analyzeCall'
+  );
 
   const content = response.data.choices[0].message.content;
   const match = content.match(/\{[\s\S]*\}/);
@@ -746,9 +929,11 @@ async function analyzeCallById(callId) {
   const { data: call } = await supabase.from('calls').select('*').eq('id', callId).single();
   if (!call?.audio_url) throw new Error('No audio');
 
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`🎤 Processing call ${callId}...`);
-  console.log(`${'='.repeat(60)}`);
+  logger.info(`🎤 Processing call ${callId}`, {
+    callId,
+    audioUrl: call.audio_url,
+    duration: call.duration
+  });
 
   const { plain, formatted } = await transcribeAudio(call.audio_url);
   await supabase.from('calls').update({ transcript: plain, transcript_formatted: formatted }).eq('id', callId);
@@ -769,7 +954,12 @@ async function analyzeCallById(callId) {
     client_info: analysis.client_info, ai_summary: analysis.ai_summary, is_successful: analysis.is_successful
   }, { onConflict: 'call_id' });
 
-  console.log(`✅ Call ${callId} done: ${analysis.total_score}/100`);
+  logger.info(`✅ Call ${callId} analyzed`, {
+    callId,
+    totalScore: analysis.total_score,
+    isSuccessful: analysis.is_successful,
+    callType: analysis.call_type
+  });
   return { transcript: plain, formatted, analysis };
 }
 
@@ -777,22 +967,32 @@ async function analyzeCallById(callId) {
 
 app.post('/api/analyze/:callId', async (req, res) => {
   try {
+    logger.info(`Starting analysis`, { callId: req.params.callId });
     const result = await analyzeCallById(req.params.callId);
     res.json({ success: true, analysis: result.analysis });
   } catch (error) {
-    console.error(`Analysis error:`, error.message);
+    logger.error(`Analysis failed`, {
+      callId: req.params.callId,
+      error: error.message,
+      stack: error.stack
+    });
     res.status(500).json({ error: error.message });
   }
 });
 
 app.post('/api/reanalyze/:callId', async (req, res) => {
   try {
+    logger.info(`Starting reanalysis`, { callId: req.params.callId });
     await supabase.from('call_scores').delete().eq('call_id', req.params.callId);
     await supabase.from('calls').update({ transcript: null, transcript_formatted: null }).eq('id', req.params.callId);
     const result = await analyzeCallById(req.params.callId);
     res.json({ success: true, analysis: result.analysis });
   } catch (error) {
-    console.error(`Reanalysis error:`, error.message);
+    logger.error(`Reanalysis failed`, {
+      callId: req.params.callId,
+      error: error.message,
+      stack: error.stack
+    });
     res.status(500).json({ error: error.message });
   }
 });
@@ -826,13 +1026,51 @@ app.get('/api/whatsapp/analyses', (req, res) => res.json({ analyses: [], message
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(`🏥 CallMind v5.0 (gpt-4o-transcribe) на порту ${PORT}`);
-  console.log(`🔀 Pipeline: ${FFMPEG_AVAILABLE
-    ? 'Stereo split → gpt-4o-transcribe×2 (kk) → GPT-4o translate → GPT-4o analyze'
-    : 'Mono: gpt-4o-transcribe (kk) → GPT-4o translate+roles → GPT-4o analyze'}`);
-  console.log(`📋 Формат: 2 блока (администратор + пациент), не диалог`);
+  logger.info(`🏥 CallMind v5.0 (gpt-4o-transcribe) запущен`, {
+    port: PORT,
+    environment: process.env.NODE_ENV || 'development',
+    ffmpeg: FFMPEG_AVAILABLE,
+    pipeline: FFMPEG_AVAILABLE
+      ? 'Stereo split → gpt-4o-transcribe×2 (kk) → GPT-4o translate → GPT-4o analyze'
+      : 'Mono: gpt-4o-transcribe (kk) → GPT-4o translate+roles → GPT-4o analyze'
+  });
+
+  logger.info(`📋 Формат вывода: 2 блока (администратор + пациент), не диалог`);
+
+  // Загружаем токены Bitrix из БД
   if (await loadTokensFromDb()) {
-    setInterval(() => syncNewCalls().catch(console.error), 5 * 60 * 1000);
+    logger.info('✅ Bitrix tokens loaded from DB');
+
+    // Автоматическая синхронизация каждые 5 минут
+    setInterval(() => {
+      syncNewCalls().catch(err => {
+        logger.error('Sync failed', { error: err.message });
+      });
+    }, 5 * 60 * 1000);
+
+    // Первая синхронизация через 30 секунд
     setTimeout(() => syncNewCalls(), 30000);
+  } else {
+    logger.warn('⚠️ Bitrix не авторизован - синхронизация отключена');
+  }
+
+  // ==================== KEEP-ALIVE МЕХАНИЗМ ====================
+  // Предотвращает засыпание на Railway
+  if (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT) {
+    const KEEP_ALIVE_URL = process.env.RAILWAY_PUBLIC_DOMAIN
+      ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}/health`
+      : `http://localhost:${PORT}/health`;
+
+    logger.info('🔄 Keep-alive механизм активирован', { url: KEEP_ALIVE_URL });
+
+    // Пингуем себя каждые 5 минут чтобы Railway не усыпил сервис
+    setInterval(async () => {
+      try {
+        await axios.get(KEEP_ALIVE_URL, { timeout: 10000 });
+        logger.debug('✅ Keep-alive ping successful');
+      } catch (error) {
+        logger.warn('⚠️ Keep-alive ping failed', { error: error.message });
+      }
+    }, 5 * 60 * 1000); // Каждые 5 минут
   }
 });
