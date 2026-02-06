@@ -523,7 +523,7 @@ async function transcribeChannel(audioBuffer, channelName) {
       headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
       timeout: 300000 // Увеличено до 5 минут для длинных записей
     }),
-    3, // 3 попытки
+    5, // 5 попыток (увеличено из-за частых rate limits)
     `transcribeChannel[${channelName}]`
   );
 
@@ -809,13 +809,15 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
         const channels = splitStereoChannels(audioBuffer, callDirection);
 
         if (channels) {
-          logger.info('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов');
+          logger.info('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов (последовательно)');
 
-          // Параллельная транскрибация
-          const [managerRaw, clientRaw] = await Promise.all([
-            transcribeChannel(channels.manager, 'администратор'),
-            transcribeChannel(channels.client, 'пациент')
-          ]);
+          // ПОСЛЕДОВАТЕЛЬНАЯ транскрибация для снижения нагрузки на API
+          // Параллельные запросы создают слишком большую нагрузку и приводят к rate limit
+          logger.info('🎤 Транскрибируем канал администратора...');
+          const managerRaw = await transcribeChannel(channels.manager, 'администратор');
+
+          logger.info('🎤 Транскрибируем канал пациента...');
+          const clientRaw = await transcribeChannel(channels.client, 'пациент');
 
           if (!managerRaw && !clientRaw) {
             return { plain: '', formatted: [] };
@@ -861,7 +863,7 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
         headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() },
         timeout: 300000 // Увеличено до 5 минут
       }),
-      3,
+      5, // 5 попыток (увеличено из-за частых rate limits)
       'transcribeAudio[mono]'
     );
 
