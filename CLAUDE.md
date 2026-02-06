@@ -31,7 +31,7 @@ Clinic CallMind AI v5.0 - An AI-powered call analytics system for Miramed clinic
 ```
 Bitrix24 Call → Webhook → Backend Sync → Audio Download
 → Stereo Split (ffmpeg) → gpt-4o-transcribe (×2 channels)
-→ GPT-4o Translation → GPT-4o Analysis → Supabase Storage
+→ GPT-4o Translation + Dialogue Reconstruction → GPT-4o Analysis → Supabase Storage
 → Frontend Display
 ```
 
@@ -114,7 +114,7 @@ docker run -p 3000:3000 --env-file .env callmind
 - Better handling of code-switching (Kazakh+Russian in same sentence)
 - Limitation: No `verbose_json` or segments support (only `json` and `text`)
 
-**Two-Block Output Format**: Returns manager and client speech as two continuous text blocks (NOT turn-by-turn dialogue). More reliable for noisy audio where role assignment can be ambiguous.
+**Dialogue Reconstruction Format v5.1**: GPT-4o reconstructs turn-by-turn dialogue from two separate audio channels, returning an array of utterances with roles (manager/client). GPT-4o infers the logical order of utterances based on question-answer patterns and conversational context, then translates each utterance to Russian.
 
 **Whisper Prompt** (lines 48-56):
 - NOT instructions but "prior context" - Whisper continues this style
@@ -132,12 +132,12 @@ docker run -p 3000:3000 --env-file .env callmind
 ### Call Scoring System (Lines 576-741)
 
 **6-Block Sales Script Analysis**:
-1. Contact Establishment (0-100 pts)
-2. Pain Point Discovery (0-100 pts)
-3. Offer Presentation (0-100 pts)
-4. Appointment Booking (0-100 pts)
-5. Objection Handling (0-100 pts, default 80 if no objections)
-6. Finalization (0-100 pts)
+1. Contact Establishment + Programming (0-100 pts) - includes Stage 1.5: taking initiative with client consent
+2. Pain Point Discovery + Amplification (0-100 pts) - what hurts, how, and impact on daily life
+3. Offer Presentation (0-100 pts) - detailed "Expert Diagnostics" with 3 components (consultation + 2-joint ultrasound + free follow-up)
+4. Appointment Booking (0-100 pts) - "choice without choice" technique, no "do you want to book?" question
+5. Objection Handling (0-100 pts, default 80 if no objections) - 4 standard objections with scripted responses
+6. Finalization (0-100 pts) - full data collection (name, DOB, date/time, address, sum, ID reminder, WhatsApp geolocation)
 
 **Scoring Logic**: GPT-4o receives full sales script as system prompt with detailed rubrics. Returns structured JSON with per-block scores and explanations.
 
