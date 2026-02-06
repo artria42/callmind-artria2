@@ -321,26 +321,27 @@ async function syncNewCalls() {
       SORT: 'CALL_START_DATE', ORDER: 'DESC'
     });
     for (const call of calls || []) {
-      // ДЕТАЛЬНОЕ ЛОГИРОВАНИЕ: все поля звонка из Bitrix24
-      logger.info('📞 Bitrix24 call data (все поля):', {
-        callId: call.ID,
-        allFields: call
-      });
-
-      const { data: existing } = await supabase.from('calls').select('id, audio_url').eq('bitrix_call_id', call.ID).single();
+      const { data: existing } = await supabase.from('calls').select('id, audio_url, call_direction').eq('bitrix_call_id', call.ID).single();
       if (existing) {
         if (!existing.audio_url && call.CALL_RECORD_URL) {
-          await supabase.from('calls').update({ audio_url: call.CALL_RECORD_URL }).eq('id', existing.id);
+          const callDirection = call.CALL_TYPE === "2" ? "outgoing" : "incoming";
+          await supabase.from('calls').update({
+            audio_url: call.CALL_RECORD_URL,
+            call_direction: callDirection
+          }).eq('id', existing.id);
           const { data: score } = await supabase.from('call_scores').select('id').eq('call_id', existing.id).single();
           if (!score) analyzeCallById(existing.id).catch(e => console.error(e.message));
         }
         continue;
       }
       const { data: manager } = await supabase.from('managers').select('id').eq('bitrix_id', call.PORTAL_USER_ID).single();
+      // CALL_TYPE: "1" = входящий, "2" = исходящий (для swap каналов)
+      const callDirection = call.CALL_TYPE === "2" ? "outgoing" : "incoming";
       const { data: newCall } = await supabase.from('calls').insert({
         bitrix_call_id: call.ID, manager_id: manager?.id, client_name: call.PHONE_NUMBER,
         duration: parseInt(call.CALL_DURATION) || 0, call_date: call.CALL_START_DATE,
         audio_url: call.CALL_RECORD_URL || null,
+        call_direction: callDirection,
         crm_link: call.CRM_ENTITY_ID ? `https://${BITRIX_DOMAIN}/crm/${(call.CRM_ENTITY_TYPE || 'contact').toLowerCase()}/details/${call.CRM_ENTITY_ID}/` : null
       }).select().single();
       if (newCall?.audio_url) {
@@ -362,10 +363,12 @@ app.get('/api/bitrix/calls', async (req, res) => {
     });
     for (const call of calls || []) {
       const { data: manager } = await supabase.from('managers').select('id').eq('bitrix_id', call.PORTAL_USER_ID).single();
+      const callDirection = call.CALL_TYPE === "2" ? "outgoing" : "incoming";
       await supabase.from('calls').upsert({
         bitrix_call_id: call.ID, manager_id: manager?.id, client_name: call.PHONE_NUMBER,
         duration: parseInt(call.CALL_DURATION) || 0, call_date: call.CALL_START_DATE,
         audio_url: call.CALL_RECORD_URL || null,
+        call_direction: callDirection,
         crm_link: call.CRM_ENTITY_ID ? `https://${BITRIX_DOMAIN}/crm/${(call.CRM_ENTITY_TYPE || 'contact').toLowerCase()}/details/${call.CRM_ENTITY_ID}/` : null
       }, { onConflict: 'bitrix_call_id' });
     }
@@ -406,9 +409,16 @@ app.get('/api/bitrix/users', async (req, res) => {
 
 /**
  * Разделяет стерео MP3 на два моно-канала через ffmpeg
- * L (левый) = пациент, R (правый) = администратор
+ *
+ * ВАЖНО: Направление звонка влияет на распределение каналов!
+ *
+ * ВХОДЯЩИЙ (incoming): LEFT = клиент, RIGHT = администратор
+ * ИСХОДЯЩИЙ (outgoing): LEFT = администратор, RIGHT = клиент
+ *
+ * @param {Buffer} audioBuffer - Аудио файл
+ * @param {string} callDirection - "incoming" или "outgoing"
  */
-function splitStereoChannels(audioBuffer) {
+function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
   const tmpDir = os.tmpdir();
   const ts = Date.now();
   const inputPath = path.join(tmpDir, `call_${ts}.mp3`);
@@ -438,11 +448,25 @@ function splitStereoChannels(audioBuffer) {
     const leftBuffer = fs.readFileSync(leftPath);
     const rightBuffer = fs.readFileSync(rightPath);
 
+    // SWAP ЛОГИКА для исходящих звонков
+    // Исходящий: LEFT=админ, RIGHT=клиент → нужно поменять местами
+    // Входящий: LEFT=клиент, RIGHT=админ → оставляем как есть
+    const isOutgoing = callDirection === 'outgoing';
+
     logger.info(`✅ Каналы разделены (WAV 16kHz)`, {
-      clientSize: leftBuffer.length,
-      managerSize: rightBuffer.length
+      direction: callDirection,
+      swapped: isOutgoing,
+      leftSize: leftBuffer.length,
+      rightSize: rightBuffer.length
     });
-    return { client: leftBuffer, manager: rightBuffer };
+
+    if (isOutgoing) {
+      // Исходящий звонок: LEFT=админ, RIGHT=клиент
+      return { client: rightBuffer, manager: leftBuffer };
+    } else {
+      // Входящий звонок: LEFT=клиент, RIGHT=админ
+      return { client: leftBuffer, manager: rightBuffer };
+    }
   } finally {
     try { fs.unlinkSync(inputPath); } catch (e) {}
     try { fs.unlinkSync(leftPath); } catch (e) {}
@@ -725,9 +749,9 @@ async function repairAndTranslateMono(rawText) {
 //  Два блока текста с форматированием абзацами (НЕ реплики!)
 // ====================================================================
 
-async function transcribeAudio(audioUrl) {
+async function transcribeAudio(audioUrl, callDirection = 'incoming') {
   try {
-    logger.info('📥 Downloading audio...', { url: audioUrl });
+    logger.info('📥 Downloading audio...', { url: audioUrl, direction: callDirection });
     const audioResponse = await axios.get(audioUrl, {
       responseType: 'arraybuffer',
       timeout: 180000, // Увеличено до 3 минут
@@ -739,7 +763,7 @@ async function transcribeAudio(audioUrl) {
     // ========== СТЕРЕО РЕЖИМ (основной) ==========
     if (FFMPEG_AVAILABLE) {
       try {
-        const channels = splitStereoChannels(audioBuffer);
+        const channels = splitStereoChannels(audioBuffer, callDirection);
 
         if (channels) {
           logger.info('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов');
@@ -1049,10 +1073,11 @@ async function analyzeCallById(callId) {
   logger.info(`🎤 Processing call ${callId}`, {
     callId,
     audioUrl: call.audio_url,
-    duration: call.duration
+    duration: call.duration,
+    direction: call.call_direction || 'incoming'
   });
 
-  const { plain, formatted } = await transcribeAudio(call.audio_url);
+  const { plain, formatted } = await transcribeAudio(call.audio_url, call.call_direction);
   await supabase.from('calls').update({ transcript: plain, transcript_formatted: formatted }).eq('id', callId);
 
   const analysis = await analyzeCall(plain, formatted);
