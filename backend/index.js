@@ -153,6 +153,9 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 let bitrixTokens = { access_token: null, refresh_token: null };
 
+// In-memory кеш обрабатываемых звонков (защита от дубликатов)
+const processingCalls = new Set();
+
 // Проверяем наличие ffmpeg при старте
 let FFMPEG_AVAILABLE = false;
 try {
@@ -1130,42 +1133,57 @@ ${dialogText}
 // ==================== ANALYZE BY ID ====================
 
 async function analyzeCallById(callId) {
-  const { data: call } = await supabase.from('calls').select('*').eq('id', callId).single();
-  if (!call?.audio_url) throw new Error('No audio');
+  // Защита от параллельной обработки одного звонка
+  if (processingCalls.has(callId)) {
+    logger.warn(`⚠️ Call ${callId} уже обрабатывается, пропускаем дубликат`);
+    throw new Error(`Call ${callId} is already being processed`);
+  }
 
-  logger.info(`🎤 Processing call ${callId}`, {
-    callId,
-    audioUrl: call.audio_url,
-    duration: call.duration,
-    direction: call.call_direction || 'incoming'
-  });
+  // Добавляем в список обрабатываемых
+  processingCalls.add(callId);
 
-  const { plain, formatted } = await transcribeAudio(call.audio_url, call.call_direction);
-  await supabase.from('calls').update({ transcript: plain, transcript_formatted: formatted }).eq('id', callId);
+  try {
+    const { data: call } = await supabase.from('calls').select('*').eq('id', callId).single();
+    if (!call?.audio_url) throw new Error('No audio');
 
-  const analysis = await analyzeCall(plain, formatted);
+    logger.info(`🎤 Processing call ${callId}`, {
+      callId,
+      audioUrl: call.audio_url,
+      duration: call.duration,
+      direction: call.call_direction || 'incoming'
+    });
 
-  await supabase.from('call_scores').upsert({
-    call_id: callId, call_type: analysis.call_type,
-    total_score: Math.round(analysis.total_score),
-    block1_score: Math.round(analysis.block1_score), block2_score: Math.round(analysis.block2_score),
-    block3_score: Math.round(analysis.block3_score), block4_score: Math.round(analysis.block4_score),
-    block5_score: Math.round(analysis.block5_score), block6_score: Math.round(analysis.block6_score),
-    score_explanations: {
-      block1: analysis.block1_explanation, block2: analysis.block2_explanation,
-      block3: analysis.block3_explanation, block4: analysis.block4_explanation,
-      block5: analysis.block5_explanation, block6: analysis.block6_explanation
-    },
-    client_info: analysis.client_info, ai_summary: analysis.ai_summary, is_successful: analysis.is_successful
-  }, { onConflict: 'call_id' });
+    const { plain, formatted } = await transcribeAudio(call.audio_url, call.call_direction);
+    await supabase.from('calls').update({ transcript: plain, transcript_formatted: formatted }).eq('id', callId);
 
-  logger.info(`✅ Call ${callId} analyzed`, {
-    callId,
-    totalScore: analysis.total_score,
-    isSuccessful: analysis.is_successful,
-    callType: analysis.call_type
-  });
-  return { transcript: plain, formatted, analysis };
+    const analysis = await analyzeCall(plain, formatted);
+
+    await supabase.from('call_scores').upsert({
+      call_id: callId, call_type: analysis.call_type,
+      total_score: Math.round(analysis.total_score),
+      block1_score: Math.round(analysis.block1_score), block2_score: Math.round(analysis.block2_score),
+      block3_score: Math.round(analysis.block3_score), block4_score: Math.round(analysis.block4_score),
+      block5_score: Math.round(analysis.block5_score), block6_score: Math.round(analysis.block6_score),
+      score_explanations: {
+        block1: analysis.block1_explanation, block2: analysis.block2_explanation,
+        block3: analysis.block3_explanation, block4: analysis.block4_explanation,
+        block5: analysis.block5_explanation, block6: analysis.block6_explanation
+      },
+      client_info: analysis.client_info, ai_summary: analysis.ai_summary, is_successful: analysis.is_successful
+    }, { onConflict: 'call_id' });
+
+    logger.info(`✅ Call ${callId} analyzed`, {
+      callId,
+      totalScore: analysis.total_score,
+      isSuccessful: analysis.is_successful,
+      callType: analysis.call_type
+    });
+
+    return { transcript: plain, formatted, analysis };
+  } finally {
+    // Обязательно удаляем из списка после завершения (успех или ошибка)
+    processingCalls.delete(callId);
+  }
 }
 
 // ==================== API ROUTES ====================
