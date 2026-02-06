@@ -106,7 +106,18 @@ const apiLimiter = rateLimit({
   }
 });
 
-app.use(cors());
+// CORS настройки - разрешаем запросы только с фронтенда
+app.use(cors({
+  origin: [
+    'https://dreamy-lokum-46cbc7.netlify.app',
+    'http://localhost:8000', // Для локальной разработки
+    /\.netlify\.app$/ // Для всех Netlify preview деплоев
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-API-Key']
+}));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/api/', apiLimiter);
