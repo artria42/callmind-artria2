@@ -501,7 +501,7 @@ function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
  * - GPT-4o потом исправит ошибки на этапе перевода
  *
  * Настройки:
- * - language='kk' (казахский) помогает лучше распознавать каз/рус микс
+ * - Автоопределение языка (НЕ указываем language) → лучше для каз/рус/микс
  * - WHISPER_PROMPT_KK с медицинскими терминами повышает точность
  * - Формат: json (text only)
  */
@@ -513,7 +513,7 @@ async function transcribeChannel(audioBuffer, channelName) {
   // WAV лучше чем MP3 для точности распознавания
   formData.append('file', audioBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
   formData.append('model', 'whisper-1'); // ДЕШЕВЛЕ $0.006/мин вместо дорогого gpt-4o-transcribe
-  formData.append('language', 'kk'); // Казахский (помогает точности для каз/рус микса)
+  // НЕ указываем language — Whisper сам определит (ru/kk/mix), лучше качество!
   formData.append('response_format', 'json');
   formData.append('prompt', WHISPER_PROMPT_KK);
 
@@ -772,7 +772,7 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
     const fd = new FormData();
     fd.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
     fd.append('model', 'whisper-1'); // ДЕШЕВЛЕ $0.006/мин
-    fd.append('language', 'kk'); // Казахский язык
+    // НЕ указываем language — Whisper сам определит (ru/kk/mix)
     fd.append('response_format', 'json');
     fd.append('prompt', WHISPER_PROMPT_KK);
 
