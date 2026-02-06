@@ -492,28 +492,28 @@ function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
 }
 
 /**
- * gpt-4o-transcribe: транскрибация одного канала с автоопределением языка
+ * whisper-1: транскрибация одного канала (ЭКОНОМИЯ!)
  *
- * Почему НЕ whisper-1:
- * - whisper-1 на казахском выдаёт "Аллаға сауын атып" вместо "Алло"
- * - gpt-4o-transcribe имеет WER на 7% ниже на казахском
- * - Лучше понимает code-switching (каз+рус в одном предложении)
+ * Возврат с gpt-4o-transcribe на whisper-1 для экономии:
+ * - gpt-4o-transcribe ДОРОГОЙ! За 50 звонков улетело $5
+ * - whisper-1 стоит $0.006/мин (в 10-20 раз дешевле!)
+ * - Качество чуть хуже на казахском, но приемлемо для бизнес-задач
+ * - GPT-4o потом исправит ошибки на этапе перевода
  *
- * Автоопределение языка (без параметра language):
- * - Работает для русских, казахских и смешанных звонков
- * - Форсирование language='kk' вызывало галлюцинации на русских звонках
- *
- * Формат: json (text only) — segments недоступны в gpt-4o-transcribe
+ * Настройки:
+ * - language='kk' (казахский) помогает лучше распознавать каз/рус микс
+ * - WHISPER_PROMPT_KK с медицинскими терминами повышает точность
+ * - Формат: json (text only)
  */
 async function transcribeChannel(audioBuffer, channelName) {
-  logger.info(`🎤 gpt-4o-transcribe [${channelName}] → OpenAI (auto language detection)...`);
+  logger.info(`🎤 whisper-1 [${channelName}] → OpenAI ($0.006/мин - экономия!)...`);
 
   const FormData = require('form-data');
   const formData = new FormData();
   // WAV лучше чем MP3 для точности распознавания
   formData.append('file', audioBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
-  formData.append('model', 'gpt-4o-transcribe');
-  // НЕ указываем language — gpt-4o-transcribe сам определит (ru/kk/mix)
+  formData.append('model', 'whisper-1'); // ДЕШЕВЛЕ $0.006/мин вместо дорогого gpt-4o-transcribe
+  formData.append('language', 'kk'); // Казахский (помогает точности для каз/рус микса)
   formData.append('response_format', 'json');
   formData.append('prompt', WHISPER_PROMPT_KK);
 
@@ -523,7 +523,7 @@ async function transcribeChannel(audioBuffer, channelName) {
       headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
       timeout: 300000 // Увеличено до 5 минут для длинных записей
     }),
-    5, // 5 попыток (увеличено из-за частых rate limits)
+    3, // 3 попытки (уменьшено для экономии)
     `transcribeChannel[${channelName}]`
   );
 
@@ -809,15 +809,13 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
         const channels = splitStereoChannels(audioBuffer, callDirection);
 
         if (channels) {
-          logger.info('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов (последовательно)');
+          logger.info('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов');
 
-          // ПОСЛЕДОВАТЕЛЬНАЯ транскрибация для снижения нагрузки на API
-          // Параллельные запросы создают слишком большую нагрузку и приводят к rate limit
-          logger.info('🎤 Транскрибируем канал администратора...');
-          const managerRaw = await transcribeChannel(channels.manager, 'администратор');
-
-          logger.info('🎤 Транскрибируем канал пациента...');
-          const clientRaw = await transcribeChannel(channels.client, 'пациент');
+          // Параллельная транскрибация
+          const [managerRaw, clientRaw] = await Promise.all([
+            transcribeChannel(channels.manager, 'администратор'),
+            transcribeChannel(channels.client, 'пациент')
+          ]);
 
           if (!managerRaw && !clientRaw) {
             return { plain: '', formatted: [] };
@@ -845,17 +843,17 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
     }
 
     // ========== МОНО FALLBACK ==========
-    logger.info('📝 Моно режим — gpt-4o-transcribe');
+    logger.info('📝 Моно режим — whisper-1 (экономия!)');
 
     const FormData = require('form-data');
     const fd = new FormData();
     fd.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
-    fd.append('model', 'gpt-4o-transcribe');
-    // НЕ указываем language — gpt-4o-transcribe сам определит (ru/kk/mix)
+    fd.append('model', 'whisper-1'); // ДЕШЕВЛЕ $0.006/мин
+    fd.append('language', 'kk'); // Казахский язык
     fd.append('response_format', 'json');
     fd.append('prompt', WHISPER_PROMPT_KK);
 
-    logger.info('🎤 gpt-4o-transcribe (mono, auto language)...');
+    logger.info('🎤 whisper-1 (mono) → $0.006/мин вместо дорогого gpt-4o-transcribe');
 
     // Используем retry логику для надежности
     const r = await callWithRetry(
@@ -863,7 +861,7 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
         headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() },
         timeout: 300000 // Увеличено до 5 минут
       }),
-      5, // 5 попыток (увеличено из-за частых rate limits)
+      3, // 3 попытки (уменьшено для экономии)
       'transcribeAudio[mono]'
     );
 
