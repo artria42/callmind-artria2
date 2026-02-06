@@ -92,6 +92,10 @@ async function callWithRetry(requestFn, maxRetries = 3, operationName = 'API cal
 
 const app = express();
 
+// Доверяем прокси Railway для корректной работы rate limiter
+// Railway использует reverse proxy, который устанавливает X-Forwarded-For заголовки
+app.set('trust proxy', 1);
+
 // ==================== RATE LIMITING ====================
 // Защита от DDoS и перерасхода OpenAI API
 const apiLimiter = rateLimit({
