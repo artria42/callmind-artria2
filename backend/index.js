@@ -64,6 +64,8 @@ async function callWithRetry(requestFn, maxRetries = 3, operationName = 'API cal
       const isRetryable =
         error.code === 'ECONNABORTED' || // Timeout
         error.code === 'ENOTFOUND' ||    // DNS
+        error.code === 'ECONNRESET' ||   // Connection reset
+        error.message?.includes('socket hang up') || // Socket errors
         error.response?.status === 429 || // Rate limit
         error.response?.status >= 500;    // Server error
 
@@ -73,17 +75,29 @@ async function callWithRetry(requestFn, maxRetries = 3, operationName = 'API cal
         logger.error(`❌ ${operationName} failed after ${attempt} attempts`, {
           error: error.message,
           status: error.response?.status,
+          code: error.code,
           attempt
         });
         throw error;
       }
 
-      // Exponential backoff: 1s, 2s, 4s, 8s...
-      const delayMs = Math.min(Math.pow(2, attempt - 1) * 1000, 10000);
-      logger.warn(`⚠️ ${operationName} failed, retry ${attempt}/${maxRetries} через ${delayMs}ms`, {
-        error: error.message,
-        status: error.response?.status
-      });
+      // Специальная обработка rate limit - более длительная задержка
+      let delayMs;
+      if (error.response?.status === 429) {
+        // Для rate limit используем более агрессивный backoff
+        delayMs = Math.min(Math.pow(2, attempt) * 2000, 30000); // 4s, 8s, 16s, max 30s
+        logger.warn(`⚠️ ${operationName} rate limited, retry ${attempt}/${maxRetries} через ${delayMs}ms`, {
+          status: 429
+        });
+      } else {
+        // Для остальных ошибок: 1s, 2s, 4s, 8s...
+        delayMs = Math.min(Math.pow(2, attempt - 1) * 1000, 10000);
+        logger.warn(`⚠️ ${operationName} failed, retry ${attempt}/${maxRetries} через ${delayMs}ms`, {
+          error: error.message,
+          status: error.response?.status,
+          code: error.code
+        });
+      }
 
       await new Promise(resolve => setTimeout(resolve, delayMs));
     }
@@ -621,7 +635,20 @@ ${clientRawText}
     'repairAndTranslate'
   );
 
-  const content = response.data.choices[0].message.content.trim();
+  // Проверяем валидность ответа
+  if (!response?.data?.choices?.length) {
+    logger.error('❌ GPT-4o translation: invalid response', {
+      responseData: response?.data
+    });
+    // Fallback - возвращаем сырой текст
+    return { manager: adminRawText, client: clientRawText };
+  }
+
+  const content = response.data.choices[0].message?.content?.trim();
+  if (!content) {
+    logger.warn('⚠️ GPT-4o translation: empty content, using raw text');
+    return { manager: adminRawText, client: clientRawText };
+  }
   let result;
   try {
     const clean = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -720,7 +747,20 @@ async function repairAndTranslateMono(rawText) {
     'repairAndTranslateMono'
   );
 
-  const content = response.data.choices[0].message.content.trim();
+  // Проверяем валидность ответа
+  if (!response?.data?.choices?.length) {
+    logger.error('❌ GPT-4o mono translation: invalid response', {
+      responseData: response?.data
+    });
+    // Fallback - возвращаем сырой текст
+    return { manager: rawText, client: '' };
+  }
+
+  const content = response.data.choices[0].message?.content?.trim();
+  if (!content) {
+    logger.warn('⚠️ GPT-4o mono translation: empty content, using raw text');
+    return { manager: rawText, client: '' };
+  }
   let result;
   try {
     const clean = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -1058,9 +1098,32 @@ ${dialogText}
     'analyzeCall'
   );
 
-  const content = response.data.choices[0].message.content;
+  // Проверяем валидность ответа
+  if (!response?.data?.choices?.length) {
+    logger.error('❌ GPT-4o returned invalid response', {
+      responseData: response?.data,
+      hasChoices: !!response?.data?.choices,
+      choicesLength: response?.data?.choices?.length
+    });
+    throw new Error('Invalid GPT-4o response: no choices array');
+  }
+
+  const content = response.data.choices[0].message?.content;
+  if (!content) {
+    logger.error('❌ GPT-4o message has no content', {
+      choice: response.data.choices[0]
+    });
+    throw new Error('Invalid GPT-4o response: no message content');
+  }
+
   const match = content.match(/\{[\s\S]*\}/);
-  if (!match) throw new Error('No JSON in analysis response');
+  if (!match) {
+    logger.error('❌ No JSON found in GPT-4o response', {
+      contentPreview: content.substring(0, 500)
+    });
+    throw new Error('No JSON in analysis response');
+  }
+
   return JSON.parse(match[0]);
 }
 
