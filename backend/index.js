@@ -151,6 +151,10 @@ const BITRIX_CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET;
 const GOOGLE_PROXY_URL = process.env.GOOGLE_PROXY_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// Yandex SpeechKit (для транскрибации казахского/русского)
+const YANDEX_API_KEY = process.env.YANDEX_API_KEY;
+const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID;
+
 let bitrixTokens = { access_token: null, refresh_token: null };
 
 // In-memory кеш обрабатываемых звонков (защита от дубликатов)
@@ -492,43 +496,47 @@ function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
 }
 
 /**
- * whisper-1: транскрибация одного канала (ЭКОНОМИЯ!)
+ * Yandex SpeechKit: транскрибация казахского/русского (ЛУЧШЕЕ КАЧЕСТВО!)
  *
- * Возврат с gpt-4o-transcribe на whisper-1 для экономии:
- * - gpt-4o-transcribe ДОРОГОЙ! За 50 звонков улетело $5
- * - whisper-1 стоит $0.006/мин (в 10-20 раз дешевле!)
- * - Качество чуть хуже на казахском, но приемлемо для бизнес-задач
- * - GPT-4o потом исправит ошибки на этапе перевода
+ * Переход с whisper-1 на Yandex SpeechKit для казахского языка:
+ * - whisper-1 ПЛОХО распознает казахский (WER 43%)
+ * - Yandex SpeechKit специально оптимизирован для каз/рус
+ * - Дата-центр в Караганде (Казахстан) - быстро!
+ * - Цена: ~$0.01/мин (в 1.6x дороже, но КАЧЕСТВО!)
  *
  * Настройки:
- * - Автоопределение языка (НЕ указываем language) → лучше для каз/рус/микс
- * - WHISPER_PROMPT_KK с медицинскими терминами повышает точность
- * - Формат: json (text only)
+ * - Автоопределение языка (auto) или kk-KZ для казахского
+ * - Формат: LPCM (WAV 16kHz)
+ * - Бесплатно: 15 часов/месяц (900 минут)
  */
 async function transcribeChannel(audioBuffer, channelName) {
-  logger.info(`🎤 whisper-1 [${channelName}] → OpenAI ($0.006/мин - экономия!)...`);
+  logger.info(`🎤 Yandex SpeechKit [${channelName}] → качество для каз/рус!`);
 
   const FormData = require('form-data');
   const formData = new FormData();
-  // WAV лучше чем MP3 для точности распознавания
-  formData.append('file', audioBuffer, { filename: 'audio.wav', contentType: 'audio/wav' });
-  formData.append('model', 'whisper-1'); // ДЕШЕВЛЕ $0.006/мин вместо дорогого gpt-4o-transcribe
-  // НЕ указываем language — Whisper сам определит (ru/kk/mix), лучше качество!
-  formData.append('response_format', 'json');
-  formData.append('prompt', WHISPER_PROMPT_KK);
+
+  // Yandex требует конкретные параметры для LPCM (WAV)
+  formData.append('audio', audioBuffer, { filename: 'audio.wav', contentType: 'audio/x-wav' });
+  formData.append('lang', 'auto'); // Автоопределение каз/рус
+  formData.append('format', 'lpcm'); // WAV формат
+  formData.append('sampleRateHertz', '16000'); // 16kHz
 
   // Используем retry логику для надежности
   const response = await callWithRetry(
-    () => axios.post('https://api.openai.com/v1/audio/transcriptions', formData, {
-      headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...formData.getHeaders() },
-      timeout: 300000 // Увеличено до 5 минут для длинных записей
+    () => axios.post('https://stt.api.cloud.yandex.net/speech/v1/stt:recognize', formData, {
+      headers: {
+        'Authorization': `Api-Key ${YANDEX_API_KEY}`,
+        'x-folder-id': YANDEX_FOLDER_ID,
+        ...formData.getHeaders()
+      },
+      timeout: 300000 // 5 минут для длинных записей
     }),
-    3, // 3 попытки (уменьшено для экономии)
+    3,
     `transcribeChannel[${channelName}]`
   );
 
-  const text = (response.data.text || '').trim();
-  logger.info(`✅ gpt-4o-transcribe [${channelName}]: ${text.length} chars`);
+  const text = (response.data.result || '').trim();
+  logger.info(`✅ Yandex SpeechKit [${channelName}]: ${text.length} chars`);
   return text;
 }
 
@@ -789,29 +797,31 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
     }
 
     // ========== МОНО FALLBACK ==========
-    logger.info('📝 Моно режим — whisper-1 (экономия!)');
+    logger.info('📝 Моно режим — Yandex SpeechKit (качество для каз/рус!)');
 
     const FormData = require('form-data');
     const fd = new FormData();
-    fd.append('file', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
-    fd.append('model', 'whisper-1'); // ДЕШЕВЛЕ $0.006/мин
-    // НЕ указываем language — Whisper сам определит (ru/kk/mix)
-    fd.append('response_format', 'json');
-    fd.append('prompt', WHISPER_PROMPT_KK);
+    fd.append('audio', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
+    fd.append('lang', 'auto'); // Автоопределение каз/рус
+    fd.append('format', 'mp3'); // MP3 формат
 
-    logger.info('🎤 whisper-1 (mono) → $0.006/мин вместо дорогого gpt-4o-transcribe');
+    logger.info('🎤 Yandex SpeechKit (mono) → качество каз/рус!');
 
     // Используем retry логику для надежности
     const r = await callWithRetry(
-      () => axios.post('https://api.openai.com/v1/audio/transcriptions', fd, {
-        headers: { 'Authorization': `Bearer ${OPENAI_API_KEY}`, ...fd.getHeaders() },
+      () => axios.post('https://stt.api.cloud.yandex.net/speech/v1/stt:recognize', fd, {
+        headers: {
+          'Authorization': `Api-Key ${YANDEX_API_KEY}`,
+          'x-folder-id': YANDEX_FOLDER_ID,
+          ...fd.getHeaders()
+        },
         timeout: 300000 // Увеличено до 5 минут
       }),
-      3, // 3 попытки (уменьшено для экономии)
+      3,
       'transcribeAudio[mono]'
     );
 
-    const rawText = (r.data.text || '').trim();
+    const rawText = (r.data.result || '').trim();
     logger.info(`✅ Mono transcribe done`, { textLength: rawText.length });
 
     if (rawText.length < 15) {
