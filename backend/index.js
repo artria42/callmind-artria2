@@ -76,7 +76,10 @@ async function callWithRetry(requestFn, maxRetries = 3, operationName = 'API cal
           error: error.message,
           status: error.response?.status,
           code: error.code,
-          attempt
+          attempt,
+          // Детали от API (для отладки Yandex)
+          responseData: error.response?.data,
+          responseHeaders: error.response?.headers
         });
         throw error;
       }
