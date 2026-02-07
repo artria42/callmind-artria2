@@ -513,7 +513,11 @@ function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
  * - Бесплатно: 15 часов/месяц (900 минут)
  */
 async function transcribeChannel(audioBuffer, channelName) {
-  logger.info(`🎤 Yandex SpeechKit [${channelName}] → качество для каз/рус!`);
+  logger.info(`🎤 Yandex SpeechKit [${channelName}] → качество для каз/рус!`, {
+    audioSize: audioBuffer.length,
+    apiKeyPrefix: YANDEX_API_KEY?.substring(0, 10) + '...',
+    folderId: YANDEX_FOLDER_ID
+  });
 
   // Yandex SpeechKit требует binary data в теле, параметры в URL
   const url = `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?` +
@@ -523,22 +527,35 @@ async function transcribeChannel(audioBuffer, channelName) {
     `sampleRateHertz=16000&` +
     `folderId=${YANDEX_FOLDER_ID}`;
 
-  // Используем retry логику для надежности
-  const response = await callWithRetry(
-    () => axios.post(url, audioBuffer, {
-      headers: {
-        'Authorization': `Api-Key ${YANDEX_API_KEY}`,
-        'Content-Type': 'audio/x-pcm;bit=16;rate=16000'
-      },
-      timeout: 300000 // 5 минут для длинных записей
-    }),
-    3,
-    `transcribeChannel[${channelName}]`
-  );
+  logger.info(`📤 Отправка запроса к Yandex`, { url: url.substring(0, 100) + '...' });
 
-  const text = (response.data.result || '').trim();
-  logger.info(`✅ Yandex SpeechKit [${channelName}]: ${text.length} chars`);
-  return text;
+  try {
+    // Используем retry логику для надежности
+    const response = await callWithRetry(
+      () => axios.post(url, audioBuffer, {
+        headers: {
+          'Authorization': `Api-Key ${YANDEX_API_KEY}`,
+          'Content-Type': 'audio/x-pcm;bit=16;rate=16000'
+        },
+        timeout: 300000 // 5 минут для длинных записей
+      }),
+      3,
+      `transcribeChannel[${channelName}]`
+    );
+
+    const text = (response.data.result || '').trim();
+    logger.info(`✅ Yandex SpeechKit [${channelName}]: ${text.length} chars`);
+    return text;
+  } catch (error) {
+    logger.error(`💥 ДЕТАЛЬНАЯ ОШИБКА Yandex [${channelName}]`, {
+      message: error.message,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data,
+      headers: error.response?.headers
+    });
+    throw error;
+  }
 }
 
 /**
