@@ -512,22 +512,20 @@ function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
 async function transcribeChannel(audioBuffer, channelName) {
   logger.info(`🎤 Yandex SpeechKit [${channelName}] → качество для каз/рус!`);
 
-  const FormData = require('form-data');
-  const formData = new FormData();
-
-  // Yandex требует конкретные параметры для LPCM (WAV)
-  formData.append('audio', audioBuffer, { filename: 'audio.wav', contentType: 'audio/x-wav' });
-  formData.append('lang', 'auto'); // Автоопределение каз/рус
-  formData.append('format', 'lpcm'); // WAV формат
-  formData.append('sampleRateHertz', '16000'); // 16kHz
+  // Yandex SpeechKit требует binary data в теле, параметры в URL
+  const url = `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?` +
+    `topic=general&` +
+    `lang=auto&` +
+    `format=lpcm&` +
+    `sampleRateHertz=16000&` +
+    `folderId=${YANDEX_FOLDER_ID}`;
 
   // Используем retry логику для надежности
   const response = await callWithRetry(
-    () => axios.post('https://stt.api.cloud.yandex.net/speech/v1/stt:recognize', formData, {
+    () => axios.post(url, audioBuffer, {
       headers: {
         'Authorization': `Api-Key ${YANDEX_API_KEY}`,
-        'x-folder-id': YANDEX_FOLDER_ID,
-        ...formData.getHeaders()
+        'Content-Type': 'audio/x-pcm;bit=16;rate=16000'
       },
       timeout: 300000 // 5 минут для длинных записей
     }),
@@ -799,21 +797,20 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
     // ========== МОНО FALLBACK ==========
     logger.info('📝 Моно режим — Yandex SpeechKit (качество для каз/рус!)');
 
-    const FormData = require('form-data');
-    const fd = new FormData();
-    fd.append('audio', audioBuffer, { filename: 'audio.mp3', contentType: 'audio/mpeg' });
-    fd.append('lang', 'auto'); // Автоопределение каз/рус
-    fd.append('format', 'mp3'); // MP3 формат
+    // Yandex SpeechKit: binary data в теле, параметры в URL (MP3 не требует sampleRate)
+    const monoUrl = `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?` +
+      `topic=general&` +
+      `lang=auto&` +
+      `folderId=${YANDEX_FOLDER_ID}`;
 
     logger.info('🎤 Yandex SpeechKit (mono) → качество каз/рус!');
 
     // Используем retry логику для надежности
     const r = await callWithRetry(
-      () => axios.post('https://stt.api.cloud.yandex.net/speech/v1/stt:recognize', fd, {
+      () => axios.post(monoUrl, audioBuffer, {
         headers: {
           'Authorization': `Api-Key ${YANDEX_API_KEY}`,
-          'x-folder-id': YANDEX_FOLDER_ID,
-          ...fd.getHeaders()
+          'Content-Type': 'audio/mpeg'
         },
         timeout: 300000 // Увеличено до 5 минут
       }),
