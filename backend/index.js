@@ -501,25 +501,31 @@ function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
 /**
  * Yandex SpeechKit: транскрибация казахского/русского (ЛУЧШЕЕ КАЧЕСТВО!)
  *
- * Переход с whisper-1 на Yandex SpeechKit для казахского языка:
- * - whisper-1 ПЛОХО распознает казахский (WER 43%)
- * - Yandex SpeechKit специально оптимизирован для каз/рус
- * - Дата-центр в Караганде (Казахстан) - быстро!
- * - Цена: ~$0.01/мин (в 1.6x дороже, но КАЧЕСТВО!)
+ * Синхронный API Yandex ограничен: макс 30 сек и 1 МБ
+ * Поэтому нарезаем WAV файл на куски по 25 секунд и отправляем по очереди
  *
- * Настройки:
- * - Автоопределение языка (auto) или kk-KZ для казахского
- * - Формат: LPCM (WAV 16kHz)
- * - Бесплатно: 15 часов/месяц (900 минут)
+ * WAV 16kHz 16bit mono = 32000 байт/сек
+ * 25 сек = 800000 байт = ~800 КБ (< 1 МБ лимит)
  */
 async function transcribeChannel(audioBuffer, channelName) {
-  logger.info(`🎤 Yandex SpeechKit [${channelName}] → качество для каз/рус!`, {
+  // WAV заголовок: 44 байта, далее raw PCM данные
+  const WAV_HEADER_SIZE = 44;
+  const BYTES_PER_SEC = 32000; // 16kHz × 16bit × mono
+  const CHUNK_SECONDS = 25; // Максимум 30 сек, берём 25 с запасом
+  const CHUNK_SIZE = BYTES_PER_SEC * CHUNK_SECONDS; // 800000 байт
+
+  const pcmData = audioBuffer.slice(WAV_HEADER_SIZE); // Убираем WAV заголовок
+  const totalSeconds = pcmData.length / BYTES_PER_SEC;
+  const totalChunks = Math.ceil(pcmData.length / CHUNK_SIZE);
+
+  logger.info(`🎤 Yandex SpeechKit [${channelName}]`, {
     audioSize: audioBuffer.length,
-    apiKeyPrefix: YANDEX_API_KEY?.substring(0, 10) + '...',
+    pcmSize: pcmData.length,
+    totalSeconds: Math.round(totalSeconds),
+    totalChunks,
     folderId: YANDEX_FOLDER_ID
   });
 
-  // Yandex SpeechKit требует binary data в теле, параметры в URL
   const url = `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?` +
     `topic=general&` +
     `lang=auto&` +
@@ -527,35 +533,49 @@ async function transcribeChannel(audioBuffer, channelName) {
     `sampleRateHertz=16000&` +
     `folderId=${YANDEX_FOLDER_ID}`;
 
-  logger.info(`📤 Отправка запроса к Yandex`, { url: url.substring(0, 100) + '...' });
+  // Нарезаем и отправляем куски последовательно
+  const results = [];
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, pcmData.length);
+    const chunk = pcmData.slice(start, end);
+    const chunkSec = Math.round(chunk.length / BYTES_PER_SEC);
 
-  try {
-    // Используем retry логику для надежности
-    const response = await callWithRetry(
-      () => axios.post(url, audioBuffer, {
-        headers: {
-          'Authorization': `Api-Key ${YANDEX_API_KEY}`,
-          'Content-Type': 'audio/x-pcm;bit=16;rate=16000'
-        },
-        timeout: 300000 // 5 минут для длинных записей
-      }),
-      3,
-      `transcribeChannel[${channelName}]`
-    );
+    logger.info(`📤 Кусок ${i + 1}/${totalChunks} [${channelName}]: ${chunkSec} сек, ${chunk.length} байт`);
 
-    const text = (response.data.result || '').trim();
-    logger.info(`✅ Yandex SpeechKit [${channelName}]: ${text.length} chars`);
-    return text;
-  } catch (error) {
-    logger.error(`💥 ДЕТАЛЬНАЯ ОШИБКА Yandex [${channelName}]`, {
-      message: error.message,
-      status: error.response?.status,
-      statusText: error.response?.statusText,
-      data: error.response?.data,
-      headers: error.response?.headers
-    });
-    throw error;
+    try {
+      const response = await callWithRetry(
+        () => axios.post(url, chunk, {
+          headers: {
+            'Authorization': `Api-Key ${YANDEX_API_KEY}`,
+            'Content-Type': 'audio/x-pcm;bit=16;rate=16000'
+          },
+          timeout: 60000 // 1 минута на кусок
+        }),
+        3,
+        `transcribeChunk[${channelName}][${i + 1}/${totalChunks}]`
+      );
+
+      const text = (response.data.result || '').trim();
+      if (text) {
+        results.push(text);
+        logger.info(`✅ Кусок ${i + 1}/${totalChunks}: "${text.substring(0, 80)}..."`);
+      } else {
+        logger.info(`⏭️ Кусок ${i + 1}/${totalChunks}: пустой (тишина)`);
+      }
+    } catch (error) {
+      logger.error(`💥 Ошибка кусок ${i + 1}/${totalChunks} [${channelName}]`, {
+        status: error.response?.status,
+        data: error.response?.data,
+        message: error.message
+      });
+      // Пропускаем битый кусок, продолжаем с остальными
+    }
   }
+
+  const fullText = results.join(' ').trim();
+  logger.info(`✅ Yandex SpeechKit [${channelName}]: ${fullText.length} chars из ${totalChunks} кусков`);
+  return fullText;
 }
 
 /**
@@ -815,30 +835,26 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
     }
 
     // ========== МОНО FALLBACK ==========
-    logger.info('📝 Моно режим — Yandex SpeechKit (качество для каз/рус!)');
+    logger.info('📝 Моно режим — Yandex SpeechKit (конвертация MP3→WAV + нарезка)');
 
-    // Yandex SpeechKit: binary data в теле, параметры в URL (MP3 не требует sampleRate)
-    const monoUrl = `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?` +
-      `topic=general&` +
-      `lang=auto&` +
-      `folderId=${YANDEX_FOLDER_ID}`;
+    // Конвертируем MP3 в WAV 16kHz mono через ffmpeg
+    const monoTs = Date.now();
+    const monoInputPath = path.join(os.tmpdir(), `mono_${monoTs}.mp3`);
+    const monoWavPath = path.join(os.tmpdir(), `mono_${monoTs}.wav`);
 
-    logger.info('🎤 Yandex SpeechKit (mono) → качество каз/рус!');
+    let rawText = '';
+    try {
+      fs.writeFileSync(monoInputPath, audioBuffer);
+      execSync(`ffmpeg -y -i "${monoInputPath}" -ar 16000 -ac 1 -f wav "${monoWavPath}"`, { stdio: 'ignore' });
+      const monoWavBuffer = fs.readFileSync(monoWavPath);
+      logger.info('🎤 Yandex SpeechKit (mono) → WAV конвертирован', { wavSize: monoWavBuffer.length });
 
-    // Используем retry логику для надежности
-    const r = await callWithRetry(
-      () => axios.post(monoUrl, audioBuffer, {
-        headers: {
-          'Authorization': `Api-Key ${YANDEX_API_KEY}`,
-          'Content-Type': 'audio/mpeg'
-        },
-        timeout: 300000 // Увеличено до 5 минут
-      }),
-      3,
-      'transcribeAudio[mono]'
-    );
-
-    const rawText = (r.data.result || '').trim();
+      // Транскрибируем через ту же функцию с нарезкой на куски
+      rawText = await transcribeChannel(monoWavBuffer, 'моно');
+    } finally {
+      try { fs.unlinkSync(monoInputPath); } catch (e) {}
+      try { fs.unlinkSync(monoWavPath); } catch (e) {}
+    }
     logger.info(`✅ Mono transcribe done`, { textLength: rawText.length });
 
     if (rawText.length < 15) {
