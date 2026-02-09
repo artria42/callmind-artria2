@@ -206,9 +206,9 @@
                     <div class="w-8 h-8 bg-cyan-100 rounded-lg flex items-center justify-center">
                         <i data-lucide="bar-chart-3" class="w-4 h-4 text-cyan-600"></i>
                     </div>
-                    <h2 class="text-lg font-bold text-slate-800">Средние баллы по блокам</h2>
+                    <h2 class="text-lg font-bold text-slate-800">Средние баллы по этапам</h2>
                 </div>
-                <div id="criteria-breakdown" class="grid grid-cols-2 lg:grid-cols-6 gap-4">
+                <div id="criteria-breakdown" class="grid grid-cols-2 lg:grid-cols-4 gap-4">
                     <p class="text-center py-4 text-slate-400 col-span-full">Загрузка...</p>
                 </div>
             </div>
@@ -822,12 +822,10 @@ function renderCriteriaBreakdown(analyzed) {
     }
     
     const blocks = [
-        { key: 'block1_score', name: 'Контакт' },
-        { key: 'block2_score', name: 'Боль' },
-        { key: 'block3_score', name: 'Презентация' },
-        { key: 'block4_score', name: 'Запись' },
-        { key: 'block5_score', name: 'Возражения' },
-        { key: 'block6_score', name: 'Финал' }
+        { key: 'block1_score', name: 'Боль (20%)' },
+        { key: 'block2_score', name: 'Ценность (30%)' },
+        { key: 'block3_score', name: 'Дожим (40%)' },
+        { key: 'block4_score', name: 'Орг. (10%)' }
     ];
     
     container.innerHTML = blocks.map(bl => {
@@ -1084,18 +1082,27 @@ async function showCallDetail(callId) {
             </div>
         ` : '';
         
-        // Блоки с объяснениями
+        // Критическая ошибка (AUTO-FAIL)
+        const criticalHtml = (score && score.has_critical_error) ? `
+            <div class="bg-red-50 border-2 border-red-300 rounded-xl p-5">
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="text-2xl">🚨</span>
+                    <h3 class="font-bold text-red-700 text-lg">КРИТИЧЕСКАЯ ОШИБКА (AUTO-FAIL)</h3>
+                </div>
+                <p class="text-red-600 font-medium">${score.critical_error_type || 'Не указана'}</p>
+            </div>
+        ` : '';
+
+        // Блоки с объяснениями — 4 этапа Virtual ROP
         const explanations = score?.score_explanations || {};
         const blocksHtml = score ? `
             <div class="bg-slate-50 rounded-xl p-5">
-                <h3 class="font-semibold text-slate-800 mb-4">Оценка по блокам</h3>
+                <h3 class="font-semibold text-slate-800 mb-4">Оценка по этапам продаж</h3>
                 <div class="space-y-3">
-                    ${renderBlockWithExplanation('Установление контакта', score.block1_score, explanations.block1, 1)}
-                    ${renderBlockWithExplanation('Выявление боли', score.block2_score, explanations.block2, 2)}
-                    ${renderBlockWithExplanation('Презентация решения', score.block3_score, explanations.block3, 3)}
-                    ${renderBlockWithExplanation('Запись', score.block4_score, explanations.block4, 4)}
-                    ${renderBlockWithExplanation('Отработка возражений', score.block5_score, explanations.block5, 5)}
-                    ${renderBlockWithExplanation('Финализация', score.block6_score, explanations.block6, 6)}
+                    ${renderBlockWithExplanation('Программирование и боль (20%)', score.block1_score, explanations.block1, 1)}
+                    ${renderBlockWithExplanation('Презентация ценности (30%)', score.block2_score, explanations.block2, 2)}
+                    ${renderBlockWithExplanation('Дожим и запись (40%)', score.block3_score, explanations.block3, 3)}
+                    ${renderBlockWithExplanation('Организация (10%)', score.block4_score, explanations.block4, 4)}
                 </div>
             </div>
         ` : '';
@@ -1142,14 +1149,16 @@ async function showCallDetail(callId) {
         content.innerHTML = `
             <div class="space-y-6">
                 ${score ? `
+                    ${criticalHtml}
+
                     <div class="bg-gradient-to-r ${gradient} rounded-2xl p-6 text-white text-center">
                         <div class="text-5xl font-bold mb-2">${score.total_score}</div>
                         <p class="text-white/80">${score.is_successful ? 'Пациент записан' : 'Запись не состоялась'}</p>
                         <p class="text-white/60 text-sm mt-1">${score.call_type || ''}</p>
                     </div>
-                    
+
                     ${clientInfoHtml}
-                    
+
                     ${blocksHtml}
                     
                     <div class="bg-violet-50 rounded-xl p-5">
