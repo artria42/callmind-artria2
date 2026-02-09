@@ -81,6 +81,10 @@
                 <span class="font-medium">WhatsApp</span>
                 <span class="ml-auto text-xs bg-slate-700 px-2 py-0.5 rounded">скоро</span>
             </button>
+            <button onclick="showScreen('script')" id="nav-script" class="nav-btn w-full flex items-center gap-3 px-4 py-3 rounded-xl nav-inactive">
+                <i data-lucide="book-open" class="w-5 h-5"></i>
+                <span class="font-medium">Скрипт</span>
+            </button>
         </nav>
         <div class="p-4 border-t border-slate-700/50">
             <div class="flex items-center gap-2 p-2 rounded-lg bg-cyan-500/20 border border-cyan-500/30">
@@ -401,6 +405,59 @@
                 <p class="text-slate-500">Интеграция в разработке</p>
             </div>
         </div>
+
+        <!-- ==================== SCRIPT ==================== -->
+        <div id="screen-script" class="screen p-4 lg:p-8 space-y-6 hidden fade-in">
+            <div>
+                <h1 class="text-2xl font-bold text-slate-800">Скрипт анализа</h1>
+                <p class="text-slate-500 text-sm mt-1">Этот текст отправляется GPT-4o как инструкция для оценки звонков. Измените его и нажмите "Сохранить".</p>
+            </div>
+
+            <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-100">
+                <div class="flex items-center justify-between mb-4">
+                    <div class="flex items-center gap-2">
+                        <div class="w-8 h-8 bg-violet-100 rounded-lg flex items-center justify-center">
+                            <i data-lucide="book-open" class="w-4 h-4 text-violet-600"></i>
+                        </div>
+                        <h2 class="text-lg font-bold text-slate-800">Текст скрипта</h2>
+                    </div>
+                    <span id="script-status" class="text-sm font-medium"></span>
+                </div>
+
+                <textarea id="script-textarea"
+                    class="w-full h-[500px] p-4 border border-slate-200 rounded-xl text-sm font-mono text-slate-700 bg-slate-50 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent resize-y"
+                    placeholder="Загрузка скрипта..."></textarea>
+
+                <div class="flex items-center gap-3 mt-4">
+                    <button onclick="saveScript()" id="btn-save-script"
+                        class="flex items-center gap-2 px-6 py-3 bg-cyan-600 text-white rounded-xl font-medium hover:bg-cyan-700 transition-colors">
+                        <i data-lucide="save" class="w-4 h-4"></i>
+                        Сохранить
+                    </button>
+                    <button onclick="resetScript()" id="btn-reset-script"
+                        class="flex items-center gap-2 px-6 py-3 bg-slate-100 text-slate-700 rounded-xl font-medium hover:bg-slate-200 transition-colors">
+                        <i data-lucide="rotate-ccw" class="w-4 h-4"></i>
+                        Сбросить по умолчанию
+                    </button>
+                    <span id="script-default-badge" class="hidden text-xs bg-emerald-100 text-emerald-700 px-3 py-1 rounded-full font-medium">По умолчанию</span>
+                </div>
+            </div>
+
+            <div class="bg-amber-50 rounded-xl p-4 border border-amber-200">
+                <div class="flex items-start gap-3">
+                    <i data-lucide="info" class="w-5 h-5 text-amber-600 mt-0.5"></i>
+                    <div class="text-sm text-amber-700">
+                        <p class="font-medium mb-1">Как это работает:</p>
+                        <ul class="space-y-1 list-disc list-inside">
+                            <li>Этот текст отправляется как системный промпт GPT-4o при анализе каждого звонка</li>
+                            <li>После сохранения все <strong>новые</strong> анализы будут использовать обновлённый скрипт</li>
+                            <li>Ранее проанализированные звонки не меняются (нажмите "Переанализировать" в карточке звонка)</li>
+                            <li>"Сбросить" вернёт скрипт к встроенному по умолчанию</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
     </main>
 
     <!-- Mobile Navigation -->
@@ -417,6 +474,10 @@
             <button onclick="showScreen('team')" class="mob-nav flex flex-col items-center gap-1 px-2 py-2 text-slate-400" data-screen="team">
                 <i data-lucide="trophy" class="w-5 h-5"></i>
                 <span class="text-xs">Команда</span>
+            </button>
+            <button onclick="showScreen('script')" class="mob-nav flex flex-col items-center gap-1 px-2 py-2 text-slate-400" data-screen="script">
+                <i data-lucide="book-open" class="w-5 h-5"></i>
+                <span class="text-xs">Скрипт</span>
             </button>
         </div>
     </nav>
@@ -1270,6 +1331,111 @@ function showScreen(id) {
     
     lucide.createIcons();
     window.scrollTo(0, 0);
+
+    // При переходе на страницу скрипта — загрузить текст
+    if (id === 'script') loadScript();
+}
+
+// ==================== СКРИПТ АНАЛИЗА ====================
+
+// Загрузить скрипт из сервера
+async function loadScript() {
+    const textarea = document.getElementById('script-textarea');
+    const status = document.getElementById('script-status');
+    const badge = document.getElementById('script-default-badge');
+
+    textarea.value = 'Загрузка...';
+    textarea.disabled = true;
+
+    try {
+        const res = await fetch(`${API_URL}/api/script`);
+        const data = await res.json();
+        textarea.value = data.script || '';
+
+        // Показать бейдж "По умолчанию" если скрипт дефолтный
+        if (data.isDefault) {
+            badge.classList.remove('hidden');
+        } else {
+            badge.classList.add('hidden');
+        }
+        status.textContent = '';
+    } catch (err) {
+        status.textContent = 'Ошибка загрузки';
+        status.className = 'text-sm font-medium text-red-600';
+    }
+    textarea.disabled = false;
+}
+
+// Сохранить скрипт
+async function saveScript() {
+    const textarea = document.getElementById('script-textarea');
+    const status = document.getElementById('script-status');
+    const btn = document.getElementById('btn-save-script');
+    const badge = document.getElementById('script-default-badge');
+
+    const script = textarea.value.trim();
+    if (script.length < 10) {
+        status.textContent = 'Скрипт слишком короткий';
+        status.className = 'text-sm font-medium text-red-600';
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Сохранение...';
+
+    try {
+        const res = await fetch(`${API_URL}/api/script`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ script })
+        });
+        const data = await res.json();
+
+        if (data.success) {
+            status.textContent = 'Сохранено!';
+            status.className = 'text-sm font-medium text-emerald-600';
+            badge.classList.add('hidden');
+        } else {
+            status.textContent = data.error || 'Ошибка сохранения';
+            status.className = 'text-sm font-medium text-red-600';
+        }
+    } catch (err) {
+        status.textContent = 'Ошибка сети';
+        status.className = 'text-sm font-medium text-red-600';
+    }
+
+    btn.disabled = false;
+    btn.innerHTML = '<i data-lucide="save" class="w-4 h-4"></i> Сохранить';
+    lucide.createIcons();
+
+    // Убрать статус через 3 секунды
+    setTimeout(() => { status.textContent = ''; }, 3000);
+}
+
+// Сбросить скрипт к дефолтному
+async function resetScript() {
+    if (!confirm('Сбросить скрипт к значению по умолчанию?')) return;
+
+    const textarea = document.getElementById('script-textarea');
+    const status = document.getElementById('script-status');
+    const badge = document.getElementById('script-default-badge');
+
+    try {
+        const res = await fetch(`${API_URL}/api/script/reset`, { method: 'POST' });
+        const data = await res.json();
+
+        if (data.success) {
+            textarea.value = data.script;
+            status.textContent = 'Сброшено к дефолтному';
+            status.className = 'text-sm font-medium text-emerald-600';
+            badge.classList.remove('hidden');
+        }
+    } catch (err) {
+        status.textContent = 'Ошибка сети';
+        status.className = 'text-sm font-medium text-red-600';
+    }
+
+    setTimeout(() => { status.textContent = ''; }, 3000);
 }
 
 // ==================== INIT ====================

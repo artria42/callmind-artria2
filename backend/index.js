@@ -908,15 +908,10 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
 }
 
 // ==================== ИИ АНАЛИЗ ====================
-// Оценка привязана к РЕАЛЬНОМУ скрипту продаж MIRAMED
+// Скрипт анализа можно менять через UI (страница "Скрипт")
 
-async function analyzeCall(transcript, formatted) {
-  const dialogText = formatted?.length
-    ? formatted.map(r => `${r.role === 'manager' ? 'АДМИНИСТРАТОР' : 'ПАЦИЕНТ'}: ${r.text}`).join('\n')
-    : transcript;
-
-  // System prompt — Виртуальный РОП с фокусом на конверсию
-  const systemPrompt = `Ты — Виртуальный РОП клиники Miramed (Актобе, Казахстан). Оффер: консультация+УЗИ 2 суставов+повтор=9900₸ (обычно 25000₸).
+// Дефолтный скрипт анализа (используется если в БД нет кастомного)
+const DEFAULT_ANALYSIS_SCRIPT = `Ты — Виртуальный РОП клиники Miramed (Актобе, Казахстан). Оффер: консультация+УЗИ 2 суставов+повтор=9900₸ (обычно 25000₸).
 
 ЦЕЛЬ: Конверсия. Жестко штрафуй "справочное бюро", поощряй дожим.
 
@@ -955,6 +950,32 @@ FEW-SHOT:
 is_successful=true ТОЛЬКО если клиент ЗАПИСАЛСЯ на дату
 
 В explanation цитируй фразы, будь жестким к пассивности.`;
+
+// Загрузка скрипта анализа из Supabase (или дефолтный если нет в БД)
+async function getAnalysisScript() {
+  try {
+    const { data } = await supabase.from('settings').select('value').eq('key', 'analysis_script').single();
+    if (data?.value) {
+      const parsed = JSON.parse(data.value);
+      if (parsed.script && parsed.script.trim().length > 0) {
+        logger.info('📋 Используем кастомный скрипт анализа из БД');
+        return parsed.script;
+      }
+    }
+  } catch (err) {
+    // Нет записи в БД — используем дефолтный
+  }
+  logger.info('📋 Используем дефолтный скрипт анализа');
+  return DEFAULT_ANALYSIS_SCRIPT;
+}
+
+async function analyzeCall(transcript, formatted) {
+  const dialogText = formatted?.length
+    ? formatted.map(r => `${r.role === 'manager' ? 'АДМИНИСТРАТОР' : 'ПАЦИЕНТ'}: ${r.text}`).join('\n')
+    : transcript;
+
+  // Загружаем скрипт из БД (или дефолтный)
+  const systemPrompt = await getAnalysisScript();
 
   const userPrompt = `Оцени звонок:
 
@@ -1141,6 +1162,43 @@ app.get('/api/calls/:id', async (req, res) => {
     const { data: call } = await supabase.from('calls').select('*, manager:managers(name)').eq('id', req.params.id).single();
     const { data: scores } = await supabase.from('call_scores').select('*').eq('call_id', req.params.id).single();
     res.json({ ...call, scores });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// ==================== СКРИПТ АНАЛИЗА ====================
+
+// Получить текущий скрипт (из БД или дефолтный)
+app.get('/api/script', async (req, res) => {
+  try {
+    const script = await getAnalysisScript();
+    const isDefault = script === DEFAULT_ANALYSIS_SCRIPT;
+    res.json({ script, isDefault });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Сохранить кастомный скрипт
+app.post('/api/script', async (req, res) => {
+  try {
+    const { script } = req.body;
+    if (!script || script.trim().length < 10) {
+      return res.status(400).json({ error: 'Скрипт слишком короткий' });
+    }
+    await supabase.from('settings').upsert({
+      key: 'analysis_script',
+      value: JSON.stringify({ script: script.trim() }),
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'key' });
+    logger.info('📋 Скрипт анализа обновлён через UI');
+    res.json({ success: true, message: 'Скрипт сохранён' });
+  } catch (error) { res.status(500).json({ error: error.message }); }
+});
+
+// Сбросить скрипт к дефолтному
+app.post('/api/script/reset', async (req, res) => {
+  try {
+    await supabase.from('settings').delete().eq('key', 'analysis_script');
+    logger.info('📋 Скрипт анализа сброшен к дефолтному');
+    res.json({ success: true, script: DEFAULT_ANALYSIS_SCRIPT });
   } catch (error) { res.status(500).json({ error: error.message }); }
 });
 
