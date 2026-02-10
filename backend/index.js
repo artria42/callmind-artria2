@@ -675,46 +675,39 @@ async function sonioxDeleteFile(fileId) {
 /**
  * Фильтрация токенов Soniox: оставляем переводы + русские оригиналы.
  *
- * ВАЖНО: Переведённые токены (translation_status === 'translation') НЕ имеют start_ms/end_ms!
- * Таймкоды есть только у оригинальных токенов. Поэтому мы переносим start_ms/end_ms
- * с оригинала на его перевод (перевод всегда идёт сразу после оригинала).
+ * ВАЖНО: Переведённые токены НЕ имеют start_ms/end_ms!
+ * Таймкоды есть только у оригинальных токенов.
+ * Мы ВСЕГДА отслеживаем последний таймкод и гарантируем что у каждого
+ * возвращённого токена есть start_ms/end_ms.
+ *
+ * Работает с ЛЮБЫМ форматом токенов (async API, WebSocket, с/без translation_status).
  *
  * @param {Array} tokens - сырые токены от Soniox
- * @returns {Array} отфильтрованные токены с таймкодами
+ * @returns {Array} отфильтрованные токены, у КАЖДОГО гарантированно есть start_ms
  */
 function filterSonioxTokens(tokens) {
   if (!tokens || tokens.length === 0) return [];
 
   const result = [];
-  let lastOriginalStartMs = 0;
-  let lastOriginalEndMs = 0;
+  let lastStartMs = 0;
+  let lastEndMs = 0;
 
-  for (let i = 0; i < tokens.length; i++) {
-    const t = tokens[i];
+  for (const t of tokens) {
+    // ВСЕГДА отслеживаем таймкоды (даже у пропускаемых токенов)
+    if (t.start_ms != null) lastStartMs = t.start_ms;
+    if (t.end_ms != null) lastEndMs = t.end_ms;
 
-    if (t.translation_status === 'original') {
-      // Оригинальный токен — запоминаем его таймкоды
-      if (t.start_ms !== undefined) lastOriginalStartMs = t.start_ms;
-      if (t.end_ms !== undefined) lastOriginalEndMs = t.end_ms;
-
-      // Русский оригинал оставляем (у него уже есть таймкоды)
-      if (t.language === 'ru') {
-        result.push(t);
-      }
-      // Казахский оригинал пропускаем — его перевод придёт следующим токеном
-    } else if (t.translation_status === 'translation') {
-      // Переведённый токен — переносим таймкоды с предыдущего оригинала
-      result.push({
-        ...t,
-        start_ms: t.start_ms !== undefined ? t.start_ms : lastOriginalStartMs,
-        end_ms: t.end_ms !== undefined ? t.end_ms : lastOriginalEndMs
-      });
-    } else {
-      // translation_status === 'none' или отсутствует — обычный токен, оставляем
-      if (t.start_ms !== undefined) lastOriginalStartMs = t.start_ms;
-      if (t.end_ms !== undefined) lastOriginalEndMs = t.end_ms;
-      result.push(t);
+    // Пропускаем казахские оригиналы (их перевод идёт следующим токеном)
+    if (t.translation_status === 'original' && t.language === 'kk') {
+      continue;
     }
+
+    // Всё остальное оставляем, ГАРАНТИРУЕМ start_ms у каждого токена
+    result.push({
+      ...t,
+      start_ms: t.start_ms != null ? t.start_ms : lastStartMs,
+      end_ms: t.end_ms != null ? t.end_ms : lastEndMs
+    });
   }
 
   logger.info(`filterSonioxTokens: ${tokens.length} → ${result.length} токенов`);
@@ -997,7 +990,7 @@ async function polishTranslation(dialog) {
         type: 'chat',
         apiKey: OPENAI_API_KEY,
         model: 'gpt-4o',
-        max_tokens: 4000,
+        max_tokens: 8000,
         temperature: 0.3,
         messages: [
           { role: 'system', content: systemPrompt },
