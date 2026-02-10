@@ -946,44 +946,154 @@ function groupMonoTokensIntoDialog(tokens, callDirection) {
 async function polishTranslation(dialog) {
   if (!dialog || dialog.length === 0) return dialog;
 
-  // Формируем текст диалога для GPT-4o
+  // Определяем режим: реконструкция диалога (≤4 реплик = "2 блока") или полировка (много реплик)
+  const needsReconstruction = dialog.length <= 4;
+
+  if (needsReconstruction) {
+    // ==================== РЕЖИМ РЕКОНСТРУКЦИИ ====================
+    // Интерливинг не сработал — получили 2 блока текста вместо диалога.
+    // GPT-4o восстанавливает реальный порядок реплик из двух блоков.
+    return await reconstructDialog(dialog);
+  } else {
+    // ==================== РЕЖИМ ПОЛИРОВКИ ====================
+    // Интерливинг сработал — много коротких реплик. Просто полируем перевод.
+    return await polishExistingDialog(dialog);
+  }
+}
+
+/**
+ * Реконструкция диалога из 2 блоков текста (admin + client).
+ * GPT-4o разбивает 2 блока на чередующиеся реплики по контексту.
+ */
+async function reconstructDialog(dialog) {
+  const dialogText = dialog.map(r => {
+    const role = r.role === 'manager' ? 'АДМИНИСТРАТОР' : 'ПАЦИЕНТ';
+    return `${role}:\n${r.text}`;
+  }).join('\n\n');
+
+  const systemPrompt = `Ты — редактор переводов медицинской клиники Мирамед (Актобе, Казахстан).
+
+Тебе даны ДВА БЛОКА текста: весь текст администратора и весь текст пациента из телефонного разговора.
+Блоки идут сплошным текстом — НЕ разбиты по репликам.
+
+ТВОЯ ЗАДАЧА:
+1. РЕКОНСТРУИРОВАТЬ диалог — разбить каждый блок на отдельные реплики
+2. ЧЕРЕДОВАТЬ реплики в правильном порядке (как шёл реальный разговор)
+3. ОТРЕДАКТИРОВАТЬ перевод — сделать естественный русский
+
+ПРАВИЛА РЕКОНСТРУКЦИИ:
+- Разговор начинается с приветствия (обычно админ звонит первым)
+- Каждая смена темы, вопрос-ответ — это новая реплика
+- Короткие подтверждения ("Ага", "Да", "Хорошо") — отдельные реплики
+- Типичный паттерн: админ спрашивает → пациент отвечает → админ спрашивает → ...
+- В конце: запись на приём, прощание
+
+ПРАВИЛА ПЕРЕВОДА:
+- Исправляй буквализмы казахского: "снизить переход" → "уменьшить боль", "сняли ноги" → "сделали снимок"
+- Исправляй искажённые казахские имена
+- Медицинские термины: артроз, PRP-терапия, плазмотерапия, УЗИ
+- Сохраняй разговорный стиль — это телефонный разговор
+
+ФОРМАТ ОТВЕТА — строго JSON массив чередующихся реплик:
+[
+  {"role": "manager", "text": "Алло, здравствуйте! Клиника Мирамед..."},
+  {"role": "client", "text": "Здравствуйте..."},
+  {"role": "manager", "text": "Расскажите, что вас беспокоит?"},
+  {"role": "client", "text": "У меня болят колени..."},
+  ...
+]
+
+Верни от 15 до 40 чередующихся реплик. JSON и ничего больше.`;
+
+  const userPrompt = `Восстанови диалог из этих двух блоков:\n\n${dialogText}`;
+
+  try {
+    logger.info(`GPT-4o: РЕКОНСТРУКЦИЯ диалога (${dialog.length} блоков → чередующиеся реплики)...`);
+
+    const response = await callWithRetry(
+      () => axios.post(GOOGLE_PROXY_URL, {
+        type: 'chat',
+        apiKey: OPENAI_API_KEY,
+        model: 'gpt-4o',
+        max_tokens: 8000,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      }, { timeout: 180000 }),
+      2,
+      'reconstructDialog'
+    );
+
+    if (!response?.data?.choices?.length) {
+      logger.warn('GPT-4o reconstruct: пустой ответ');
+      return dialog;
+    }
+
+    const content = response.data.choices[0].message?.content;
+    if (!content) {
+      logger.warn('GPT-4o reconstruct: нет контента');
+      return dialog;
+    }
+
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      logger.warn('GPT-4o reconstruct: не найден JSON', { preview: content.substring(0, 200) });
+      return dialog;
+    }
+
+    const reconstructed = JSON.parse(jsonMatch[0]);
+
+    if (!Array.isArray(reconstructed) || reconstructed.length < 5) {
+      logger.warn(`GPT-4o reconstruct: слишком мало реплик (${reconstructed.length})`);
+      return dialog;
+    }
+
+    // Валидируем роли
+    const result = reconstructed.map(r => ({
+      role: r.role === 'manager' || r.role === 'client' ? r.role : 'manager',
+      text: (r.text || '').trim()
+    })).filter(r => r.text.length > 0);
+
+    logger.info(`GPT-4o reconstruct: ${dialog.length} блоков → ${result.length} реплик`);
+    return result;
+
+  } catch (error) {
+    logger.warn('GPT-4o reconstruct: ошибка', { error: error.message });
+    return dialog;
+  }
+}
+
+/**
+ * Полировка уже разбитого диалога (много коротких реплик).
+ * GPT-4o только улучшает качество перевода, не меняя структуру.
+ */
+async function polishExistingDialog(dialog) {
   const dialogText = dialog.map((r, i) => {
     const role = r.role === 'manager' ? 'Администратор' : 'Пациент';
     return `[${i + 1}] ${role}: ${r.text}`;
   }).join('\n');
 
-  const systemPrompt = `Ты — редактор переводов медицинской клиники в Актобе, Казахстан (клиника Мирамед).
+  const systemPrompt = `Ты — редактор переводов медицинской клиники Мирамед (Актобе, Казахстан).
 
 Тебе дан ЧЕРНОВОЙ МАШИННЫЙ перевод телефонного разговора с казахского на русский.
-Машинный перевод часто буквальный, неестественный, искажает имена и медицинские термины.
-
-ТВОЯ ЗАДАЧА: Отредактировать каждую реплику, чтобы она звучала как естественная русская речь.
+Диалог уже разбит по репликам — НЕ меняй структуру, только отредактируй текст.
 
 ПРАВИЛА:
-1. Сохрани ТОЧНО такое же количество реплик (${dialog.length} штук) и те же роли
+1. Сохрани ТОЧНО ${dialog.length} реплик и те же роли
 2. НЕ добавляй и НЕ удаляй реплики, НЕ меняй порядок
-3. Исправляй буквализмы казахского на нормальный русский:
-   - "снизить переход" → "уменьшить боль"
-   - "сняли ноги" → "сделали снимок ног"
-   - "недостаточность закончилась" → "жидкости не осталось"
-   - "быстрый целитель" → "костоправ/целитель"
-4. Исправляй искажённые казахские имена (Сатлев → Тлеп, Нурханат → Нурхат и т.д.)
-5. Медицинские термины: артроз, PRP-терапия, плазмотерапия, УЗИ, тромбоциты
-6. НЕ добавляй то, чего нет в оригинале — только редактируй существующий текст
-7. Сохраняй разговорный стиль — это телефонный разговор, не литературный текст
+3. Исправляй буквализмы: "снизить переход" → "уменьшить боль", "сняли ноги" → "сделали снимок"
+4. Исправляй имена, медицинские термины
+5. Сохраняй разговорный стиль
 
-ФОРМАТ ОТВЕТА — строго JSON массив:
-[
-  {"role": "manager", "text": "отредактированный текст"},
-  {"role": "client", "text": "отредактированный текст"}
-]
+ФОРМАТ — строго JSON массив, ровно ${dialog.length} элементов:
+[{"role": "manager", "text": "..."}, {"role": "client", "text": "..."}, ...]`;
 
-Ровно ${dialog.length} элементов, JSON и ничего больше.`;
-
-  const userPrompt = `Отредактируй этот черновой перевод (${dialog.length} реплик):\n\n${dialogText}`;
+  const userPrompt = `Отредактируй (${dialog.length} реплик):\n\n${dialogText}`;
 
   try {
-    logger.info(`GPT-4o: полировка перевода (${dialog.length} реплик, ${dialogText.length} символов)...`);
+    logger.info(`GPT-4o: полировка перевода (${dialog.length} реплик)...`);
 
     const response = await callWithRetry(
       () => axios.post(GOOGLE_PROXY_URL, {
@@ -1001,33 +1111,21 @@ async function polishTranslation(dialog) {
       'polishTranslation'
     );
 
-    if (!response?.data?.choices?.length) {
-      logger.warn('GPT-4o polish: пустой ответ, возвращаем оригинал');
-      return dialog;
-    }
+    if (!response?.data?.choices?.length) return dialog;
 
     const content = response.data.choices[0].message?.content;
-    if (!content) {
-      logger.warn('GPT-4o polish: нет контента, возвращаем оригинал');
-      return dialog;
-    }
+    if (!content) return dialog;
 
-    // Извлекаем JSON массив из ответа
     const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      logger.warn('GPT-4o polish: не найден JSON массив', { contentPreview: content.substring(0, 200) });
-      return dialog;
-    }
+    if (!jsonMatch) return dialog;
 
     const polished = JSON.parse(jsonMatch[0]);
 
-    // Проверяем что количество реплик совпадает
     if (!Array.isArray(polished) || polished.length !== dialog.length) {
-      logger.warn(`GPT-4o polish: количество реплик не совпадает (${polished.length} vs ${dialog.length}), возвращаем оригинал`);
+      logger.warn(`GPT-4o polish: реплик ${polished.length} vs ${dialog.length}, возвращаем оригинал`);
       return dialog;
     }
 
-    // Восстанавливаем роли из оригинала (на случай если GPT их изменил)
     const result = polished.map((p, i) => ({
       role: dialog[i].role,
       text: (p.text || dialog[i].text).trim()
@@ -1037,8 +1135,7 @@ async function polishTranslation(dialog) {
     return result;
 
   } catch (error) {
-    // Если GPT-4o не ответил — возвращаем оригинальный перевод Soniox
-    logger.warn('GPT-4o polish: ошибка, возвращаем оригинал Soniox', { error: error.message });
+    logger.warn('GPT-4o polish: ошибка', { error: error.message });
     return dialog;
   }
 }
