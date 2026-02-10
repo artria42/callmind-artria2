@@ -15,9 +15,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Clinic CallMind AI v5.0 - An AI-powered call analytics system for Miramed clinic (Aktobe, Kazakhstan). Analyzes medical consultation phone calls in Kazakh/Russian, transcribes and translates them, and scores call quality against a defined sales script.
+Clinic CallMind AI v6.0 - An AI-powered call analytics system for Miramed clinic (Aktobe, Kazakhstan). Analyzes medical consultation phone calls in Kazakh/Russian, transcribes and translates them, and scores call quality against a defined sales script.
 
-**Core Value Proposition**: Automated quality assurance for clinic call center operations using stereo audio channel separation and GPT-4o analysis.
+**Core Value Proposition**: Automated quality assurance for clinic call center operations using Soniox STT (WER 9% on Kazakh) with stereo channel separation and GPT-4o analysis.
 
 ## Architecture
 
@@ -30,23 +30,25 @@ Clinic CallMind AI v5.0 - An AI-powered call analytics system for Miramed clinic
 
 ```
 Bitrix24 Call → Webhook → Backend Sync → Audio Download
-→ Stereo Split (ffmpeg) → gpt-4o-transcribe (×2 channels)
-→ GPT-4o Literal Translation (2 blocks) → GPT-4o Analysis → Supabase Storage
-→ Frontend Display
+→ Stereo Split (ffmpeg) → Soniox STT ×2 channels (transcribe + translate kk→ru)
+→ Merge by timestamps → Interleaved dialog → GPT-4o Analysis → Supabase Storage
+→ Frontend Display (alternating manager/client replicas)
 ```
 
 ### Backend Architecture
 
 **Core Pipeline** ([backend/index.js](backend/index.js)):
-- **Transcription**: Uses `gpt-4o-transcribe` model (better WER for Kazakh than whisper-1: 36% vs 43%)
+- **Transcription**: Uses Soniox STT API (WER 9% on Kazakh — best in class, $0.10/hour)
 - **Stereo Processing**: ffmpeg splits audio into left (patient) and right (admin) channels
-- **Translation**: GPT-4o translates Kazakh/Russian mixed speech to clean Russian
-- **Analysis**: GPT-4o scores calls against 6-block sales script rubric
+- **Translation**: Built-in Soniox one-way translation kk→ru (no separate GPT-4o call needed)
+- **Dialog Assembly**: Word-level timestamps from Soniox → group into replicas by pauses → merge channels by time
+- **Analysis**: GPT-4o scores calls against 4-block sales script rubric
 
 **Integration Points**:
 - Bitrix24 OAuth + REST API for call data/CRM
 - Supabase for persistent storage (calls, managers, scores)
-- OpenAI API via GOOGLE_PROXY_URL
+- Soniox STT API for transcription + translation
+- OpenAI API via GOOGLE_PROXY_URL (for analysis only)
 
 **Database Schema** (Supabase):
 - `calls` - call metadata, audio URLs, transcripts
@@ -82,6 +84,7 @@ BITRIX_CLIENT_ID=
 BITRIX_CLIENT_SECRET=
 GOOGLE_PROXY_URL=
 OPENAI_API_KEY=
+SONIOX_API_KEY=
 PORT=3000
 ```
 
@@ -107,37 +110,35 @@ docker run -p 3000:3000 --env-file .env callmind
 
 ## Key Implementation Details
 
-### Transcription Strategy (Lines 225-574)
+### Transcription Strategy (Soniox STT v6.0)
 
-**Why gpt-4o-transcribe over whisper-1**:
-- 7% better WER on Kazakh language (research: MDPI July 2025)
-- Better handling of code-switching (Kazakh+Russian in same sentence)
-- Limitation: No `verbose_json` or segments support (only `json` and `text`)
+**Why Soniox over gpt-4o-transcribe/whisper-1**:
+- WER 9% on Kazakh (vs 36% gpt-4o-transcribe, vs 43% whisper-1) — best in class
+- Built-in speaker diarization (up to 15 speakers)
+- Word-level timestamps for dialog reconstruction
+- Built-in translation kk→ru (no separate GPT-4o call needed)
+- Code-switching kk/ru detected per-word automatically
+- Cost: $0.10/hour (vs $0.36/hour for OpenAI)
 
-**Two-Block Output Format v5.2**: GPT-4o translates each audio channel LITERALLY to Russian without attempting to reconstruct turn-by-turn dialogue. Returns two text blocks (manager + client) formatted with paragraphs for readability. This approach prioritizes translation accuracy over dialogue reconstruction, as reconstructing turn order without timestamps leads to GPT hallucinating details.
+**Dialog Output Format v6.0**: Soniox returns word-level tokens with timestamps, speaker IDs, and language tags. Tokens are grouped into replicas by pauses (>1.5s threshold), then merged from both channels by start_ms timestamps. Result: interleaved dialog `[{role: 'manager', text: '...'}, {role: 'client', text: '...'}, ...]`.
 
-**Whisper Prompt** (lines 48-56):
-- NOT instructions but "prior context" - Whisper continues this style
-- Contains realistic medical call opening in Kazakh to guide transcription
-- Includes common medical terms and clinic-specific phrases
+**Context Terms**: Soniox supports `context.terms` (boost recognition of specific words like "Мирамед", "УЗИ") and `context.translation_terms` (custom kk→ru dictionary for medical terms).
 
-### Stereo Channel Processing (Lines 249-287)
+### Stereo Channel Processing
 
 **Function**: `splitStereoChannels()`
-- Left channel = patient, Right channel = admin
-- Converts to WAV 16kHz mono for better transcription quality
-- Fallback to mono mode if audio has <2 channels or ffmpeg unavailable
+- Left channel = patient, Right channel = admin (swapped for outgoing calls)
+- Converts to WAV 16kHz mono for Soniox upload
+- Fallback to mono mode with Soniox diarization if audio has <2 channels or ffmpeg unavailable
 - Uses temp files in OS tmpdir, cleaned up in finally block
 
-### Call Scoring System (Lines 576-741)
+### Call Scoring System (4-Block Sales Script)
 
-**6-Block Sales Script Analysis**:
-1. Contact Establishment + Programming (0-100 pts) - includes Stage 1.5: taking initiative with client consent
-2. Pain Point Discovery + Amplification (0-100 pts) - what hurts, how, and impact on daily life
-3. Offer Presentation (0-100 pts) - detailed "Expert Diagnostics" with 3 components (consultation + 2-joint ultrasound + free follow-up)
-4. Appointment Booking (0-100 pts) - "choice without choice" technique, no "do you want to book?" question
-5. Objection Handling (0-100 pts, default 80 if no objections) - 4 standard objections with scripted responses
-6. Finalization (0-100 pts) - full data collection (name, DOB, date/time, address, sum, ID reminder, WhatsApp geolocation)
+**4-Block Sales Script Analysis**:
+1. Programming + Pain Discovery (20%) - taking initiative, qualifying pain points
+2. Value Presentation (30%) - price fork, USDs of 2 joints, free follow-up bonus
+3. Closing + Booking (40%) - "choice without choice" technique, objection handling
+4. Organization (10%) - full data collection (name, DOB, location, ID reminder)
 
 **Scoring Logic**: GPT-4o receives full sales script as system prompt with detailed rubrics. Returns structured JSON with per-block scores and explanations.
 
@@ -169,7 +170,7 @@ docker run -p 3000:3000 --env-file .env callmind
 ### Language-Specific
 
 - **Primary Languages**: Kazakh and Russian (often code-switched in single call)
-- **Medical Terminology**: See Kazakh→Russian dictionary in system prompts (lines 342-357, 430-434)
+- **Medical Terminology**: See Kazakh→Russian dictionary in Soniox `context.translation_terms` (sonioxCreateTranscription function)
 - **Clinic Specifics**: Miramed clinic, 9,900 KZT diagnostic package, joint/spine treatment
 
 ### Audio Processing
@@ -180,8 +181,8 @@ docker run -p 3000:3000 --env-file .env callmind
 
 ### API Limitations
 
-- **OpenAI Timeout**: 180s for transcription, 120s for translation/analysis
-- **gpt-4o-transcribe**: No segments or timestamps (returns plain text only)
+- **Soniox**: Max file 1 GB, async API with polling (3s intervals, 5min timeout)
+- **OpenAI Timeout**: 180s for analysis
 - **Rate Limits**: Sequential processing (no parallel analysis of multiple calls)
 
 ## Common Development Patterns
@@ -195,9 +196,10 @@ docker run -p 3000:3000 --env-file .env callmind
 
 ### Modifying Transcription
 
-- **Language**: Change `language: 'kk'` parameter (line 307, 542)
-- **Prompt**: Modify `WHISPER_PROMPT_KK` constant (lines 48-56)
-- **Model**: Replace `gpt-4o-transcribe` string (lines 306, 541)
+- **Languages**: Change `language_hints` array in `sonioxCreateTranscription()`
+- **Context Terms**: Add medical terms to `context.terms` array for better recognition
+- **Translation Dictionary**: Add kk→ru pairs to `context.translation_terms`
+- **Pause Threshold**: Adjust `pauseThresholdMs` parameter in `groupTokensIntoReplicas()` (default 1500ms)
 
 ### Adding New API Endpoints
 
@@ -224,8 +226,10 @@ No automated tests currently. Manual testing workflow:
 
 ## Important Code Locations
 
-- Transcription pipeline: lines 489-574
-- GPT-4o analysis system prompt: lines 585-698
-- Stereo channel split: lines 250-287
-- Bitrix sync logic: lines 167-194
-- Frontend modal rendering: lines 768-937
+- Soniox API functions (upload, transcribe, poll, get, delete): ~lines 500-680
+- Token processing (groupTokensIntoReplicas, mergeChannelReplicas, groupMonoTokensIntoDialog): ~lines 680-900
+- Main transcribeAudio() pipeline: ~lines 900-990
+- GPT-4o analysis system prompt: analyzeCall() function
+- Stereo channel split: splitStereoChannels() function
+- Bitrix sync logic: syncNewCalls() function
+- Frontend modal rendering: showCallDetail() in frontend/index.html

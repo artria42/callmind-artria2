@@ -154,9 +154,9 @@ const BITRIX_CLIENT_SECRET = process.env.BITRIX_CLIENT_SECRET;
 const GOOGLE_PROXY_URL = process.env.GOOGLE_PROXY_URL;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// Yandex SpeechKit (для транскрибации казахского/русского)
-const YANDEX_API_KEY = process.env.YANDEX_API_KEY;
-const YANDEX_FOLDER_ID = process.env.YANDEX_FOLDER_ID;
+// Soniox Speech-to-Text (транскрибация казахского/русского, WER 9%)
+const SONIOX_API_KEY = process.env.SONIOX_API_KEY;
+const SONIOX_API_URL = 'https://api.soniox.com/v1';
 
 let bitrixTokens = { access_token: null, refresh_token: null };
 
@@ -170,27 +170,8 @@ try {
   FFMPEG_AVAILABLE = true;
   logger.info('✅ ffmpeg найден');
 } catch (e) {
-  logger.warn('⚠️ ffmpeg не найден — разделение каналов недоступно, будет fallback на GPT-4o');
+  logger.warn('⚠️ ffmpeg не найден — разделение каналов недоступно, будет fallback на Soniox моно с диаризацией');
 }
-
-// ====================================================================
-//  FIX #1: WHISPER PROMPT — связные фразы вместо списка слов
-//
-//  Whisper prompt — это НЕ инструкция. Это "предшествующий контекст",
-//  как будто этот текст уже был произнесён. Whisper продолжает стиль.
-//
-//  Старый prompt: список слов через запятую → Whisper не понимает контекст
-//  Новый prompt: реалистичное начало разговора → Whisper подхватывает стиль
-// ====================================================================
-const WHISPER_PROMPT_KK =
-  'Алло, сәлеметсіз бе. Клиника Мирамед, хабарласып тұрмын. ' +
-  'Сіздің буыныңыз ауырады ма? Тізе, бел, омыртқа, иық. ' +
-  'Артроз, грыжа, диагностика, емдеу. ' +
-  'Дәрігерге жазылу, консультация, тексеру. МРТ, рентген. ' +
-  'Диагностика тоғыз мың тоғыз жүз теңге. ' +
-  'Қалай ауырады, қашан ауырады, түнде мазалай ма, жүргенде ше. ' +
-  'Здравствуйте, клиника Мирамед. Запись на приём, обследование, диагностика. ' +
-  'Суставы, позвоночник, колено, поясница, артроз, грыжа. Девять тысяч девятьсот тенге.';
 
 // ==================== TOKENS ====================
 
@@ -223,8 +204,8 @@ async function loadTokensFromDb() {
 app.get('/', (req, res) => {
   res.json({
     status: 'ok',
-    message: '🏥 Clinic CallMind API v5.0',
-    features: ['bitrix', 'ai-analysis', 'stereo-channel-split', 'gpt-4o-transcribe', 'two-block-format'],
+    message: '🏥 Clinic CallMind API v6.0',
+    features: ['bitrix', 'ai-analysis', 'stereo-channel-split', 'soniox-stt', 'dialog-format'],
     ffmpeg: FFMPEG_AVAILABLE,
     bitrix_connected: !!bitrixTokens.access_token
   });
@@ -247,6 +228,7 @@ app.get('/health', (req, res) => {
       bitrix: !!bitrixTokens.access_token,
       ffmpeg: FFMPEG_AVAILABLE,
       supabase: true, // Проверяем что подключение есть
+      soniox: !!process.env.SONIOX_API_KEY,
       openai: !!process.env.OPENAI_API_KEY
     },
     environment: process.env.NODE_ENV || 'development'
@@ -411,24 +393,14 @@ app.get('/api/bitrix/users', async (req, res) => {
 });
 
 // ====================================================================
-//  ТРАНСКРИБАЦИЯ v5.0
+//  ТРАНСКРИБАЦИЯ v6.0 (Soniox)
 //
-//  КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: whisper-1 → gpt-4o-transcribe
+//  Soniox STT: WER 9% на казахском (лучший в мире)
+//  Встроенная диаризация + перевод каз→рус + word timestamps
+//  Заменяет: Yandex SpeechKit + GPT-4o перевод
 //
-//  Исследование казахского STT (MDPI, July 2025) показало:
-//  - Whisper-1 (v2) на казахском: WER ~43%
-//  - gpt-4o-transcribe на казахском: WER ~36% (лучший среди не fine-tuned)
-//  - Значительно лучше chrF (81.15) и COMET (1.02) — сохраняет смысл
-//
-//  gpt-4o-transcribe:
-//  ✅ Значительно лучше на казахском (меньше галлюцинаций, лучше WER)
-//  ✅ Поддерживает language + prompt
-//  ✅ Тот же API endpoint /v1/audio/transcriptions
-//  ❌ НЕ поддерживает verbose_json / segments — только json и text
-//  → Нам segments НЕ нужны — мы используем формат "два полотна текста"
-//
-//  ФОРМАТ ВЫВОДА v5.2: Два блока текста (manager + client)
-//  GPT-4o переводит ДОСЛОВНО, форматирует абзацами, НЕ восстанавливает порядок
+//  ФОРМАТ ВЫВОДА v6.0: Чередующиеся реплики [{role, text}, ...]
+//  Вместо двух блоков текста — полноценный диалог по ролям
 // ====================================================================
 
 /**
@@ -498,327 +470,431 @@ function splitStereoChannels(audioBuffer, callDirection = 'incoming') {
   }
 }
 
+// ====================================================================
+//  SONIOX SPEECH-TO-TEXT API v6.0
+//
+//  Soniox: WER 9% на казахском (лучший в мире), $0.10/час
+//  Встроенная диаризация + перевод каз→рус + word timestamps
+//  Заменяет: Yandex SpeechKit + GPT-4o перевод
+// ====================================================================
+
 /**
- * Yandex SpeechKit: транскрибация казахского/русского (ЛУЧШЕЕ КАЧЕСТВО!)
- *
- * Синхронный API Yandex ограничен: макс 30 сек и 1 МБ
- * Поэтому нарезаем WAV файл на куски по 25 секунд и отправляем по очереди
- *
- * WAV 16kHz 16bit mono = 32000 байт/сек
- * 25 сек = 800000 байт = ~800 КБ (< 1 МБ лимит)
+ * Soniox: загрузка аудиофайла
+ * POST /v1/files (multipart/form-data)
+ * @param {Buffer} audioBuffer - аудио файл (WAV или MP3)
+ * @param {string} fileName - имя файла
+ * @returns {string} fileId - идентификатор файла на Soniox
  */
-async function transcribeChannel(audioBuffer, channelName) {
-  // WAV заголовок: 44 байта, далее raw PCM данные
-  const WAV_HEADER_SIZE = 44;
-  const BYTES_PER_SEC = 32000; // 16kHz × 16bit × mono
-  const CHUNK_SECONDS = 25; // Максимум 30 сек, берём 25 с запасом
-  const CHUNK_SIZE = BYTES_PER_SEC * CHUNK_SECONDS; // 800000 байт
+async function sonioxUploadFile(audioBuffer, fileName) {
+  const FormData = require('form-data');
+  const formData = new FormData();
+  formData.append('file', audioBuffer, { filename: fileName });
 
-  const pcmData = audioBuffer.slice(WAV_HEADER_SIZE); // Убираем WAV заголовок
-  const totalSeconds = pcmData.length / BYTES_PER_SEC;
-  const totalChunks = Math.ceil(pcmData.length / CHUNK_SIZE);
+  const response = await callWithRetry(
+    () => axios.post(`${SONIOX_API_URL}/files`, formData, {
+      headers: {
+        ...formData.getHeaders(),
+        'Authorization': `Bearer ${SONIOX_API_KEY}`
+      },
+      timeout: 120000 // 2 минуты на загрузку
+    }),
+    3,
+    `sonioxUpload[${fileName}]`
+  );
 
-  logger.info(`🎤 Yandex SpeechKit [${channelName}]`, {
-    audioSize: audioBuffer.length,
-    pcmSize: pcmData.length,
-    totalSeconds: Math.round(totalSeconds),
-    totalChunks,
-    folderId: YANDEX_FOLDER_ID
-  });
+  const fileId = response.data.id;
+  logger.info(`Soniox файл загружен: ${fileId}`, { fileName, size: audioBuffer.length });
+  return fileId;
+}
 
-  const url = `https://stt.api.cloud.yandex.net/speech/v1/stt:recognize?` +
-    `topic=general&` +
-    `lang=auto&` +
-    `format=lpcm&` +
-    `sampleRateHertz=16000&` +
-    `folderId=${YANDEX_FOLDER_ID}`;
+/**
+ * Soniox: создание задачи транскрибации
+ * POST /v1/transcriptions
+ * @param {string} fileId - ID файла на Soniox
+ * @param {boolean} useDiarization - включить диаризацию (для моно)
+ * @returns {string} transcriptionId
+ */
+async function sonioxCreateTranscription(fileId, useDiarization) {
+  const params = {
+    model: 'stt-async-preview',
+    file_id: fileId,
+    // Казахский и русский — основные языки клиники
+    language_hints: ['kk', 'ru'],
+    enable_language_identification: true,
+    // Встроенный перевод каз→рус (заменяет GPT-4o перевод)
+    translation: { type: 'one_way', target_language: 'ru' },
+    // Контекст клиники для повышения точности распознавания
+    context: {
+      terms: [
+        'Мирамед', 'УЗИ', 'сустав', 'суставы', 'позвоночник',
+        'диагностика', 'колено', 'поясница', 'артроз', 'грыжа',
+        'PRP', 'блокада', 'гиалуроновая', 'консультация',
+        'девять тысяч девятьсот', '9900', 'тенге'
+      ],
+      translation_terms: [
+        { source: 'буын', target: 'сустав' },
+        { source: 'омыртқа', target: 'позвоночник' },
+        { source: 'бел', target: 'поясница' },
+        { source: 'тізе', target: 'колено' },
+        { source: 'ауырады', target: 'болит' },
+        { source: 'дәрігер', target: 'врач' },
+        { source: 'тексеру', target: 'обследование' },
+        { source: 'емдеу', target: 'лечение' },
+        { source: 'жазылу', target: 'записаться' },
+        { source: 'қанша тұрады', target: 'сколько стоит' },
+        { source: 'Мейрамед', target: 'Мирамед' }
+      ]
+    }
+  };
 
-  // Нарезаем и отправляем куски последовательно
-  const results = [];
-  for (let i = 0; i < totalChunks; i++) {
-    const start = i * CHUNK_SIZE;
-    const end = Math.min(start + CHUNK_SIZE, pcmData.length);
-    const chunk = pcmData.slice(start, end);
-    const chunkSec = Math.round(chunk.length / BYTES_PER_SEC);
+  // Диаризация только для моно (для стерео каналы уже разделены)
+  if (useDiarization) {
+    params.enable_speaker_diarization = true;
+  }
 
-    logger.info(`📤 Кусок ${i + 1}/${totalChunks} [${channelName}]: ${chunkSec} сек, ${chunk.length} байт`);
+  const response = await callWithRetry(
+    () => axios.post(`${SONIOX_API_URL}/transcriptions`, params, {
+      headers: {
+        'Authorization': `Bearer ${SONIOX_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    }),
+    3,
+    'sonioxCreateTranscription'
+  );
 
-    try {
-      const response = await callWithRetry(
-        () => axios.post(url, chunk, {
-          headers: {
-            'Authorization': `Api-Key ${YANDEX_API_KEY}`,
-            'Content-Type': 'audio/x-pcm;bit=16;rate=16000'
-          },
-          timeout: 60000 // 1 минута на кусок
-        }),
-        3,
-        `transcribeChunk[${channelName}][${i + 1}/${totalChunks}]`
-      );
+  const transcriptionId = response.data.id;
+  logger.info(`Soniox задача создана: ${transcriptionId}`, { fileId, useDiarization });
+  return transcriptionId;
+}
 
-      const text = (response.data.result || '').trim();
-      if (text) {
-        results.push(text);
-        logger.info(`✅ Кусок ${i + 1}/${totalChunks}: "${text.substring(0, 80)}..."`);
-      } else {
-        logger.info(`⏭️ Кусок ${i + 1}/${totalChunks}: пустой (тишина)`);
+/**
+ * Soniox: ожидание завершения транскрибации (polling)
+ * GET /v1/transcriptions/{id} каждые 3 секунды
+ * @param {string} transcriptionId - ID задачи
+ * @param {number} maxWaitMs - максимальное время ожидания (по умолчанию 5 минут)
+ */
+async function sonioxWaitForCompletion(transcriptionId, maxWaitMs = 300000) {
+  const startTime = Date.now();
+  const POLL_INTERVAL = 3000; // Проверяем каждые 3 секунды
+
+  while (Date.now() - startTime < maxWaitMs) {
+    const response = await axios.get(
+      `${SONIOX_API_URL}/transcriptions/${transcriptionId}`,
+      {
+        headers: { 'Authorization': `Bearer ${SONIOX_API_KEY}` },
+        timeout: 10000
       }
-    } catch (error) {
-      logger.error(`💥 Ошибка кусок ${i + 1}/${totalChunks} [${channelName}]`, {
-        status: error.response?.status,
-        data: error.response?.data,
-        message: error.message
+    );
+
+    const status = response.data.status;
+    logger.debug(`Soniox статус: ${status}`, { transcriptionId });
+
+    if (status === 'completed') {
+      logger.info(`Soniox транскрибация завершена`, {
+        transcriptionId,
+        durationMs: Date.now() - startTime,
+        audioDurationMs: response.data.audio_duration_ms
       });
-      // Пропускаем битый кусок, продолжаем с остальными
+      return;
     }
+
+    if (status === 'error') {
+      throw new Error(`Soniox ошибка: ${response.data.error_type} - ${response.data.error_message}`);
+    }
+
+    // queued или processing — ждем
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
   }
 
-  const fullText = results.join(' ').trim();
-  logger.info(`✅ Yandex SpeechKit [${channelName}]: ${fullText.length} chars из ${totalChunks} кусков`);
-  return fullText;
+  throw new Error(`Soniox timeout: транскрибация не завершилась за ${maxWaitMs / 1000} сек`);
 }
 
 /**
- * GPT-4o: Перевод двух каналов → два блока текста с форматированием
- *
- * ЛОГИКА v5.2:
- * Получаем два канала (админ + клиент), переводим ДОСЛОВНО на русский,
- * форматируем абзацами (после 2-3 предложений).
- * НЕ восстанавливаем порядок реплик — это приводит к выдумыванию деталей.
- *
- * Формат: { manager: "текст админа\n\nабзац2\n\nабзац3", client: "текст клиента..." }
+ * Soniox: получение результата транскрибации
+ * GET /v1/transcriptions/{id}/transcript
+ * @param {string} transcriptionId - ID задачи
+ * @returns {Array} массив токенов [{text, start_ms, end_ms, speaker, language, translation_status, confidence}]
  */
-async function repairAndTranslate(adminRawText, clientRawText) {
-  logger.info('📝 СЫРОЙ ТЕКСТ ОТ gpt-4o-transcribe (до перевода)', {
-    adminLength: adminRawText.length,
-    clientLength: clientRawText.length,
-    adminPreview: adminRawText.substring(0, 200),
-    clientPreview: clientRawText.substring(0, 200)
-  });
-
-  if (!adminRawText.trim() && !clientRawText.trim()) {
-    return { manager: '', client: '' };
-  }
-
-  const systemPrompt = `Переводчик звонков клиники Miramed (Актобе). Каз/рус → чистый русский.
-
-КОНТЕКСТ: Клиника безоперационного лечения суставов и позвоночника "Мирамед" (Актобе, Казахстан).
-Оффер: консультация + УЗИ 2 суставов + бесплатный повторный приём = 9900₸ (обычно 25000₸).
-
-ДВА ПРАВИЛА:
-1. НЕ ДОДУМЫВАЙ новые фразы, которых не было в оригинале
-2. ИСПРАВЛЯЙ ошибки распознавания (это НЕ додумывание, а восстановление!)
-
-ИСПРАВЛЕНИЯ ОШИБОК РАСПОЗНАВАНИЯ (обязательно!):
-- мейрамет/мирамет/мейрамед → Мирамед (название клиники)
-- ферпи/перпи/пиарпи → PRP (PRP-терапия = плазмотерапия)
-- терпения/терпение → терапия (контекст: блокада + терапия)
-- гиалуронов/гиалурон → гиалуроновая кислота
-- блокат/блокада терпения → блокада
-- травматолог ортопет → травматолог-ортопед
-- регенерационный → регенерационный (оставить как есть)
-- Если слово явно искажено распознаванием → восстанови его по контексту
-
-СЛОВАРЬ (каз→рус):
-буын=сустав, омыртқа=позвоночник, бел=поясница, тізе=колено
-ауырады=болит, қатты ауырады=сильно болит, ісінді=отёк
-дәрігер=врач, тексеру=обследование, емдеу=лечение
-жазылу=записаться, қанша тұрады=сколько стоит
-бағасы=цена, қымбат=дорого, ойланайын=подумаю
-Сәлеметсіз бе=Здравствуйте, Қайырлы күн=Добрый день
-иә/ия=да, жоқ=нет, жақсы=хорошо, рахмет=спасибо
-аға/ага=обращение к старшему, апа=обращение к женщине
-
-ФОРМАТ: Переведи каждый канал ОТДЕЛЬНО. Форматируй абзацами (\\n\\n после 2-3 предложений).
-
-JSON: {"manager": "текст администратора\\n\\nабзац2", "client": "текст пациента\\n\\nабзац2"}`;
-
-  const userPrompt = `КАНАЛ АДМИНИСТРАТОРА (сырой):
-${adminRawText}
-
-КАНАЛ ПАЦИЕНТА (сырой):
-${clientRawText}
-
-Переведи оба канала ДОСЛОВНО на русский, сохрани все детали, отформатируй абзацами. Верни JSON.`;
-
-  logger.info('🧠 GPT-4o: перевод двух каналов (v5.2 - точность)...');
-
-  // Используем retry логику для надежности
-  const response = await callWithRetry(
-    () => axios.post(GOOGLE_PROXY_URL, {
-      type: 'chat',
-      apiKey: OPENAI_API_KEY,
-      model: 'gpt-4o',
-      max_tokens: 4000,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ]
-    }, { timeout: 180000 }), // Увеличено до 3 минут
-    3,
-    'repairAndTranslate'
+async function sonioxGetTranscript(transcriptionId) {
+  const response = await axios.get(
+    `${SONIOX_API_URL}/transcriptions/${transcriptionId}/transcript`,
+    {
+      headers: { 'Authorization': `Bearer ${SONIOX_API_KEY}` },
+      timeout: 30000
+    }
   );
 
-  // Проверяем валидность ответа
-  if (!response?.data?.choices?.length) {
-    logger.error('❌ GPT-4o translation: invalid response', {
-      responseData: response?.data
-    });
-    // Fallback - возвращаем сырой текст
-    return { manager: adminRawText, client: clientRawText };
-  }
-
-  const content = response.data.choices[0].message?.content?.trim();
-  if (!content) {
-    logger.warn('⚠️ GPT-4o translation: empty content, using raw text');
-    return { manager: adminRawText, client: clientRawText };
-  }
-  let result;
-  try {
-    const clean = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    result = JSON.parse(clean);
-  } catch (e) {
-    const match = content.match(/\{[\s\S]*\}/);
-    if (match) {
-      result = JSON.parse(match[0]);
-    } else {
-      logger.warn('⚠️ GPT не вернул JSON, fallback', {
-        contentPreview: content.substring(0, 200)
-      });
-      result = { manager: adminRawText, client: clientRawText };
-    }
-  }
-
-  const managerText = (result.manager || result.admin || '').trim();
-  const clientText = (result.client || result.patient || '').trim();
-
-  logger.info(`✅ Перевод done (v5.2)`, {
-    managerLength: managerText.length,
-    clientLength: clientText.length
-  });
-
-  return { manager: managerText, client: clientText };
+  const tokens = response.data.tokens || [];
+  logger.info(`Soniox транскрипт: ${tokens.length} токенов`, { transcriptionId });
+  return tokens;
 }
 
 /**
- * GPT-4o: Перевод моно-аудио (оба голоса в одном канале) → два блока текста
- *
- * ЛОГИКА v5.2:
- * Из моно-транскрипта GPT-4o разделяет по ролям, переводит ДОСЛОВНО,
- * форматирует абзацами. Возвращает два блока (manager + client).
+ * Soniox: удаление файла (очистка после обработки)
+ * DELETE /v1/files/{file_id}
+ * @param {string} fileId - ID файла
  */
-async function repairAndTranslateMono(rawText) {
-  if (!rawText || rawText.trim().length < 15) {
-    return { manager: rawText || '', client: '' };
-  }
-
-  const systemPrompt = `Переводчик моно-канала клиники Miramed (Актобе). Каз/рус → чистый русский.
-
-КОНТЕКСТ: Клиника безоперационного лечения суставов и позвоночника "Мирамед" (Актобе, Казахстан).
-Оффер: консультация + УЗИ 2 суставов + бесплатный повторный приём = 9900₸ (обычно 25000₸).
-
-ДВА ПРАВИЛА:
-1. НЕ ДОДУМЫВАЙ новые фразы, которых не было в оригинале
-2. ИСПРАВЛЯЙ ошибки распознавания (это НЕ додумывание, а восстановление!)
-
-ИСПРАВЛЕНИЯ ОШИБОК РАСПОЗНАВАНИЯ (обязательно!):
-- мейрамет/мирамет/мейрамед → Мирамед (название клиники)
-- ферпи/перпи/пиарпи → PRP (PRP-терапия = плазмотерапия)
-- терпения/терпение → терапия (контекст: блокада + терапия)
-- гиалуронов/гиалурон → гиалуроновая кислота
-- блокат/блокада терпения → блокада
-- травматолог ортопет → травматолог-ортопед
-- Если слово явно искажено распознаванием → восстанови его по контексту
-
-СЛОВАРЬ (каз→рус):
-буын=сустав, омыртқа=позвоночник, бел=поясница, тізе=колено
-ауырады=болит, қатты ауырады=сильно болит, ісінді=отёк
-дәрігер=врач, тексеру=обследование, емдеу=лечение
-жазылу=записаться, қанша тұрады=сколько стоит
-бағасы=цена, қымбат=дорого, ойланайын=подумаю
-Сәлеметсіз бе=Здравствуйте, Қайырлы күн=Добрый день
-иә/ия=да, жоқ=нет, жақсы=хорошо, рахмет=спасибо
-аға/ага=обращение к старшему, апа=обращение к женщине
-
-АЛГОРИТМ:
-1. Определи кто говорит (админ: предлагает, пациент: жалуется)
-2. Переведи каждую реплику 1-в-1, сохрани обрывки и паузы
-3. Форматируй абзацами для читабельности
-
-JSON: {"manager": "текст администратора\\n\\nабзац2", "client": "текст пациента\\n\\nабзац2"}`;
-
-  logger.info('🧠 GPT-4o: перевод моно (v5.2 - точность)...');
-
-  // Используем retry логику для надежности
-  const response = await callWithRetry(
-    () => axios.post(GOOGLE_PROXY_URL, {
-      type: 'chat',
-      apiKey: OPENAI_API_KEY,
-      model: 'gpt-4o',
-      max_tokens: 4000,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: `ТРАНСКРИПТ (моно):\n${rawText}\n\nРаздели по ролям, переведи ДОСЛОВНО на русский, отформатируй абзацами. Верни JSON.` }
-      ]
-    }, { timeout: 180000 }), // Увеличено до 3 минут
-    3,
-    'repairAndTranslateMono'
-  );
-
-  // Проверяем валидность ответа
-  if (!response?.data?.choices?.length) {
-    logger.error('❌ GPT-4o mono translation: invalid response', {
-      responseData: response?.data
-    });
-    // Fallback - возвращаем сырой текст
-    return { manager: rawText, client: '' };
-  }
-
-  const content = response.data.choices[0].message?.content?.trim();
-  if (!content) {
-    logger.warn('⚠️ GPT-4o mono translation: empty content, using raw text');
-    return { manager: rawText, client: '' };
-  }
-  let result;
+async function sonioxDeleteFile(fileId) {
   try {
-    const clean = content.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    result = JSON.parse(clean);
-  } catch (e) {
-    const match = content.match(/\{[\s\S]*\}/);
-    result = match ? JSON.parse(match[0]) : { manager: rawText, client: '' };
+    await axios.delete(`${SONIOX_API_URL}/files/${fileId}`, {
+      headers: { 'Authorization': `Bearer ${SONIOX_API_KEY}` },
+      timeout: 10000
+    });
+    logger.debug(`Soniox файл удален: ${fileId}`);
+  } catch (error) {
+    // Не критично — не блокируем основной pipeline
+    logger.warn(`Soniox не удалось удалить файл ${fileId}`, { error: error.message });
   }
-
-  const managerText = (result.manager || result.admin || '').trim();
-  const clientText = (result.client || result.patient || '').trim();
-
-  logger.info(`✅ Моно-перевод done (v5.2)`, {
-    managerLength: managerText.length,
-    clientLength: clientText.length
-  });
-
-  return { manager: managerText, client: clientText };
 }
 
 // ====================================================================
-//  ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ v5.2
+//  ОБРАБОТКА ТОКЕНОВ SONIOX
 //
-//  Pipeline: gpt-4o-transcribe (каждый канал) → GPT-4o (перевод ДОСЛОВНЫЙ)
-//  Вывод: formatted = [{ role: 'manager', text: '...' }, { role: 'client', text: '...' }]
-//  Два блока текста с форматированием абзацами (НЕ реплики!)
+//  Токены от Soniox содержат: text, start_ms, end_ms, speaker,
+//  language, translation_status, confidence
+//  Нужно: сгруппировать в реплики по паузам и merge по таймкодам
+// ====================================================================
+
+/**
+ * Группировка токенов одного канала в реплики по паузам
+ *
+ * Если между токенами пауза > порога — это разные реплики.
+ * Фильтрует: берёт переведённые + русские оригиналы, пропускает казахские оригиналы.
+ *
+ * @param {Array} tokens - токены от Soniox [{text, start_ms, end_ms, language, translation_status}]
+ * @param {string} role - 'manager' или 'client'
+ * @param {number} pauseThresholdMs - порог паузы в мс (по умолчанию 1500)
+ * @returns {Array} реплики [{role, text, start_ms, end_ms}]
+ */
+function groupTokensIntoReplicas(tokens, role, pauseThresholdMs = 1500) {
+  if (!tokens || tokens.length === 0) return [];
+
+  // Берём только переведённые токены или русские оригиналы
+  // Пропускаем оригиналы казахского (они дублируются переводом)
+  const filtered = tokens.filter(t => {
+    if (t.language === 'kk' && t.translation_status === 'original') return false;
+    return true;
+  });
+
+  if (filtered.length === 0) return [];
+
+  const replicas = [];
+  let currentWords = [filtered[0].text];
+  let currentStartMs = filtered[0].start_ms;
+  let currentEndMs = filtered[0].end_ms;
+
+  for (let i = 1; i < filtered.length; i++) {
+    const prevEnd = filtered[i - 1].end_ms;
+    const currStart = filtered[i].start_ms;
+    const pause = currStart - prevEnd;
+
+    if (pause > pauseThresholdMs) {
+      // Пауза — сохраняем реплику и начинаем новую
+      const text = currentWords.join('').trim();
+      if (text) {
+        replicas.push({ role, text, start_ms: currentStartMs, end_ms: currentEndMs });
+      }
+      currentWords = [filtered[i].text];
+      currentStartMs = filtered[i].start_ms;
+    } else {
+      currentWords.push(filtered[i].text);
+    }
+    currentEndMs = filtered[i].end_ms;
+  }
+
+  // Последняя реплика
+  const lastText = currentWords.join('').trim();
+  if (lastText) {
+    replicas.push({ role, text: lastText, start_ms: currentStartMs, end_ms: currentEndMs });
+  }
+
+  logger.info(`Сгруппировано ${filtered.length} токенов → ${replicas.length} реплик [${role}]`);
+  return replicas;
+}
+
+/**
+ * Merge реплик из двух каналов в чередующийся диалог по таймкодам
+ *
+ * @param {Array} managerReplicas - реплики менеджера [{role, text, start_ms, end_ms}]
+ * @param {Array} clientReplicas - реплики клиента [{role, text, start_ms, end_ms}]
+ * @returns {Array} диалог [{role, text}]
+ */
+function mergeChannelReplicas(managerReplicas, clientReplicas) {
+  // Объединяем и сортируем по start_ms
+  const all = [...managerReplicas, ...clientReplicas];
+  all.sort((a, b) => a.start_ms - b.start_ms);
+
+  // Убираем start_ms/end_ms — фронтенд ожидает [{role, text}]
+  const dialog = all.map(r => ({ role: r.role, text: r.text }));
+
+  logger.info(`Merge диалог: ${dialog.length} реплик`, {
+    manager: managerReplicas.length,
+    client: clientReplicas.length
+  });
+
+  return dialog;
+}
+
+/**
+ * Soniox: полный pipeline для одного аудио-канала (стерео режим)
+ * Загрузка → Транскрибация+Перевод → Polling → Результат → Очистка
+ *
+ * @param {Buffer} audioBuffer - WAV аудио одного канала
+ * @param {string} channelName - 'администратор' или 'пациент' (для логов)
+ * @returns {Array} токены от Soniox
+ */
+async function transcribeChannelWithSoniox(audioBuffer, channelName) {
+  const fileName = `channel_${channelName}_${Date.now()}.wav`;
+  let fileId = null;
+
+  try {
+    logger.info(`Soniox [${channelName}]: загрузка файла...`, { size: audioBuffer.length });
+    fileId = await sonioxUploadFile(audioBuffer, fileName);
+
+    // БЕЗ диаризации — канал уже содержит одного спикера
+    logger.info(`Soniox [${channelName}]: запуск транскрибации...`);
+    const transcriptionId = await sonioxCreateTranscription(fileId, false);
+
+    logger.info(`Soniox [${channelName}]: ожидание результата...`);
+    await sonioxWaitForCompletion(transcriptionId);
+
+    const tokens = await sonioxGetTranscript(transcriptionId);
+    logger.info(`Soniox [${channelName}]: получено ${tokens.length} токенов`);
+    return tokens;
+  } finally {
+    // Удаляем файл (не блокируем pipeline)
+    if (fileId) sonioxDeleteFile(fileId);
+  }
+}
+
+/**
+ * Soniox: полный pipeline для моно-аудио (с диаризацией)
+ *
+ * @param {Buffer} audioBuffer - MP3 или WAV аудио
+ * @returns {Array} токены от Soniox (с полем speaker)
+ */
+async function transcribeMonoWithSoniox(audioBuffer) {
+  const fileName = `mono_${Date.now()}.mp3`;
+  let fileId = null;
+
+  try {
+    logger.info('Soniox [моно]: загрузка файла...', { size: audioBuffer.length });
+    fileId = await sonioxUploadFile(audioBuffer, fileName);
+
+    // С диаризацией — определяем спикеров автоматически
+    logger.info('Soniox [моно]: запуск транскрибации с диаризацией...');
+    const transcriptionId = await sonioxCreateTranscription(fileId, true);
+
+    logger.info('Soniox [моно]: ожидание результата...');
+    await sonioxWaitForCompletion(transcriptionId);
+
+    const tokens = await sonioxGetTranscript(transcriptionId);
+    logger.info(`Soniox [моно]: получено ${tokens.length} токенов`);
+    return tokens;
+  } finally {
+    if (fileId) sonioxDeleteFile(fileId);
+  }
+}
+
+/**
+ * Группировка моно-токенов в диалог по speaker + паузы
+ *
+ * Soniox назначает speaker: "1", "2" и т.д.
+ * Первый speaker = admin (поднимает трубку / звонит)
+ *
+ * @param {Array} tokens - токены с полем speaker
+ * @param {string} callDirection - 'incoming' или 'outgoing'
+ * @returns {Array} диалог [{role, text}]
+ */
+function groupMonoTokensIntoDialog(tokens, callDirection) {
+  if (!tokens || tokens.length === 0) return [];
+
+  // Фильтруем: только переведённые + русские оригиналы
+  const filtered = tokens.filter(t => {
+    if (t.language === 'kk' && t.translation_status === 'original') return false;
+    return true;
+  });
+
+  if (filtered.length === 0) return [];
+
+  // Первый speaker = admin (обычно admin начинает разговор)
+  const firstSpeaker = filtered[0].speaker || '1';
+  const speakerRoleMap = {};
+  speakerRoleMap[firstSpeaker] = 'manager';
+
+  // Группируем по смене speaker или по паузам
+  const PAUSE_THRESHOLD = 1500;
+  const replicas = [];
+  let currentWords = [filtered[0].text];
+  let currentSpeaker = filtered[0].speaker || '1';
+  let currentStartMs = filtered[0].start_ms;
+
+  for (let i = 1; i < filtered.length; i++) {
+    const token = filtered[i];
+    const prevToken = filtered[i - 1];
+    const speaker = token.speaker || '1';
+    const pause = token.start_ms - prevToken.end_ms;
+
+    // Новая реплика при смене speaker или длинной паузе
+    if (speaker !== currentSpeaker || pause > PAUSE_THRESHOLD) {
+      const text = currentWords.join('').trim();
+      if (text) {
+        if (!speakerRoleMap[currentSpeaker]) {
+          speakerRoleMap[currentSpeaker] = 'client';
+        }
+        replicas.push({ role: speakerRoleMap[currentSpeaker], text, start_ms: currentStartMs });
+      }
+      currentWords = [token.text];
+      currentSpeaker = speaker;
+      currentStartMs = token.start_ms;
+    } else {
+      currentWords.push(token.text);
+    }
+  }
+
+  // Последняя реплика
+  const lastText = currentWords.join('').trim();
+  if (lastText) {
+    if (!speakerRoleMap[currentSpeaker]) {
+      speakerRoleMap[currentSpeaker] = 'client';
+    }
+    replicas.push({ role: speakerRoleMap[currentSpeaker], text: lastText, start_ms: currentStartMs });
+  }
+
+  // Сортируем и убираем start_ms
+  replicas.sort((a, b) => a.start_ms - b.start_ms);
+  const dialog = replicas.map(r => ({ role: r.role, text: r.text }));
+
+  logger.info(`Моно-диалог: ${dialog.length} реплик`, {
+    speakers: Object.keys(speakerRoleMap).length
+  });
+
+  return dialog;
+}
+
+// ====================================================================
+//  ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ v6.0 (Soniox)
+//
+//  Pipeline:
+//    СТЕРЕО: ffmpeg split → Soniox ×2 (транскрибация+перевод) → merge → диалог
+//    МОНО: Soniox (транскрибация+перевод+диаризация) → диалог
+//
+//  Вывод: formatted = [{role: 'manager', text: 'реплика'}, {role: 'client', text: 'реплика'}, ...]
+//  Чередующиеся реплики с ролями (настоящий диалог!)
 // ====================================================================
 
 async function transcribeAudio(audioUrl, callDirection = 'incoming') {
   try {
-    logger.info('📥 Downloading audio...', { url: audioUrl, direction: callDirection });
+    logger.info('Скачиваю аудио...', { url: audioUrl, direction: callDirection });
     const audioResponse = await axios.get(audioUrl, {
       responseType: 'arraybuffer',
-      timeout: 180000, // Увеличено до 3 минут
+      timeout: 180000,
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
     const audioBuffer = Buffer.from(audioResponse.data);
-    logger.info(`📦 Audio downloaded`, { size: audioBuffer.length });
+    logger.info(`Аудио скачано: ${audioBuffer.length} байт`);
 
     // ========== СТЕРЕО РЕЖИМ (основной) ==========
     if (FFMPEG_AVAILABLE) {
@@ -826,79 +902,53 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
         const channels = splitStereoChannels(audioBuffer, callDirection);
 
         if (channels) {
-          logger.info('🔀 Стерео режим — gpt-4o-transcribe × 2 каналов');
+          logger.info('Стерео режим: Soniox ×2 каналов');
 
-          // Параллельная транскрибация
-          const [managerRaw, clientRaw] = await Promise.all([
-            transcribeChannel(channels.manager, 'администратор'),
-            transcribeChannel(channels.client, 'пациент')
+          // Параллельная транскрибация двух каналов через Soniox
+          const [managerTokens, clientTokens] = await Promise.all([
+            transcribeChannelWithSoniox(channels.manager, 'администратор'),
+            transcribeChannelWithSoniox(channels.client, 'пациент')
           ]);
 
-          if (!managerRaw && !clientRaw) {
+          // Группируем токены в реплики по паузам
+          const managerReplicas = groupTokensIntoReplicas(managerTokens, 'manager');
+          const clientReplicas = groupTokensIntoReplicas(clientTokens, 'client');
+
+          // Merge в чередующийся диалог по таймкодам
+          const formatted = mergeChannelReplicas(managerReplicas, clientReplicas);
+
+          if (formatted.length === 0) {
             return { plain: '', formatted: [] };
           }
 
-          logger.info(`✅ Transcribe done`, {
-            managerLength: managerRaw.length,
-            clientLength: clientRaw.length
-          });
-
-          // GPT-4o: перевод двух каналов → два блока с форматированием
-          const translated = await repairAndTranslate(managerRaw, clientRaw);
-
-          const formatted = [];
-          if (translated.manager) formatted.push({ role: 'manager', text: translated.manager });
-          if (translated.client) formatted.push({ role: 'client', text: translated.client });
-
-          const plainText = formatted.map(r => r.text).join(' ');
-          logger.info(`✅ Стерео pipeline v5.2 done`, { blocks: formatted.length });
-          return { plain: plainText, formatted };
+          const plain = formatted.map(r => r.text).join(' ');
+          logger.info(`Стерео pipeline v6.0 done: ${formatted.length} реплик`);
+          return { plain, formatted };
         }
       } catch (e) {
-        logger.warn('⚠️ Stereo failed, falling back to mono', { error: e.message });
+        logger.warn('Стерео failed, fallback на моно', { error: e.message });
       }
     }
 
     // ========== МОНО FALLBACK ==========
-    logger.info('📝 Моно режим — Yandex SpeechKit (конвертация MP3→WAV + нарезка)');
+    // Soniox принимает MP3 напрямую — не нужна конвертация в WAV
+    logger.info('Моно режим: Soniox с диаризацией');
 
-    // Конвертируем MP3 в WAV 16kHz mono через ffmpeg
-    const monoTs = Date.now();
-    const monoInputPath = path.join(os.tmpdir(), `mono_${monoTs}.mp3`);
-    const monoWavPath = path.join(os.tmpdir(), `mono_${monoTs}.wav`);
+    const monoTokens = await transcribeMonoWithSoniox(audioBuffer);
 
-    let rawText = '';
-    try {
-      fs.writeFileSync(monoInputPath, audioBuffer);
-      execSync(`ffmpeg -y -i "${monoInputPath}" -ar 16000 -ac 1 -f wav "${monoWavPath}"`, { stdio: 'ignore' });
-      const monoWavBuffer = fs.readFileSync(monoWavPath);
-      logger.info('🎤 Yandex SpeechKit (mono) → WAV конвертирован', { wavSize: monoWavBuffer.length });
+    // Группируем по speaker + паузы → чередующийся диалог
+    const formatted = groupMonoTokensIntoDialog(monoTokens, callDirection);
 
-      // Транскрибируем через ту же функцию с нарезкой на куски
-      rawText = await transcribeChannel(monoWavBuffer, 'моно');
-    } finally {
-      try { fs.unlinkSync(monoInputPath); } catch (e) {}
-      try { fs.unlinkSync(monoWavPath); } catch (e) {}
-    }
-    logger.info(`✅ Mono transcribe done`, { textLength: rawText.length });
-
-    if (rawText.length < 15) {
-      return { plain: rawText, formatted: [{ role: 'manager', text: rawText }] };
+    if (formatted.length === 0) {
+      return { plain: '', formatted: [] };
     }
 
-    // GPT-4o: перевод + разделение по ролям → два блока с форматированием
-    const translated = await repairAndTranslateMono(rawText);
-
-    const formatted = [];
-    if (translated.manager) formatted.push({ role: 'manager', text: translated.manager });
-    if (translated.client) formatted.push({ role: 'client', text: translated.client });
-
-    const finalPlain = formatted.map(r => r.text).join(' ');
-    logger.info(`✅ Mono pipeline v5.2 done`, { blocks: formatted.length });
-    return { plain: finalPlain, formatted };
+    const plain = formatted.map(r => r.text).join(' ');
+    logger.info(`Моно pipeline v6.0 done: ${formatted.length} реплик`);
+    return { plain, formatted };
 
   } catch (error) {
-    logger.error('❌ Transcription error', {
+    logger.error('Ошибка транскрибации', {
       error: error.message,
       stack: error.stack,
       audioUrl
@@ -1209,16 +1259,17 @@ app.get('/api/whatsapp/analyses', (req, res) => res.json({ analyses: [], message
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  logger.info(`🏥 CallMind v5.0 (gpt-4o-transcribe) запущен`, {
+  logger.info(`🏥 CallMind v6.0 (Soniox STT) запущен`, {
     port: PORT,
     environment: process.env.NODE_ENV || 'development',
     ffmpeg: FFMPEG_AVAILABLE,
+    soniox: !!SONIOX_API_KEY,
     pipeline: FFMPEG_AVAILABLE
-      ? 'Stereo split → gpt-4o-transcribe×2 (kk) → GPT-4o translate → GPT-4o analyze'
-      : 'Mono: gpt-4o-transcribe (kk) → GPT-4o translate+roles → GPT-4o analyze'
+      ? 'Stereo split → Soniox ×2 (kk/ru + translate) → merge by timestamps → GPT-4o analyze'
+      : 'Mono: Soniox (kk/ru + diarization + translate) → GPT-4o analyze'
   });
 
-  logger.info(`📋 Формат вывода: 2 блока (администратор + пациент), не диалог`);
+  logger.info(`📋 Формат вывода: чередующиеся реплики по ролям (диалог)`);
 
   // Загружаем токены Bitrix из БД
   if (await loadTokensFromDb()) {
