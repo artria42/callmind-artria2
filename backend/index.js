@@ -673,44 +673,79 @@ async function sonioxDeleteFile(fileId) {
 // ====================================================================
 
 /**
- * Фильтрация токенов Soniox: оставляем переводы + русские оригиналы.
+ * Фильтрация токенов Soniox: ЯВНОЕ СПАРИВАНИЕ оригинал→перевод.
  *
- * ВАЖНО: Переведённые токены НЕ имеют start_ms/end_ms!
- * Таймкоды есть только у оригинальных токенов.
- * Мы ВСЕГДА отслеживаем последний таймкод и гарантируем что у каждого
- * возвращённого токена есть start_ms/end_ms.
+ * Проблема: переведённые токены НЕ имеют start_ms/end_ms.
+ * Решение: явно спариваем каждый казахский оригинал с его переводом.
+ * Берём ТАЙМКОД от оригинала + ТЕКСТ от перевода = один токен.
  *
- * Работает с ЛЮБЫМ форматом токенов (async API, WebSocket, с/без translation_status).
+ * Порядок токенов Soniox:
+ *   {text: "каз слово", start_ms: 100, language: "kk", translation_status: "original"}
+ *   {text: "рус перевод", start_ms: null, language: "ru", translation_status: "translation"}
  *
  * @param {Array} tokens - сырые токены от Soniox
- * @returns {Array} отфильтрованные токены, у КАЖДОГО гарантированно есть start_ms
+ * @returns {Array} токены с гарантированными start_ms/end_ms
  */
 function filterSonioxTokens(tokens) {
   if (!tokens || tokens.length === 0) return [];
 
   const result = [];
-  let lastStartMs = 0;
-  let lastEndMs = 0;
+  let paired = 0;
+  let ruOriginals = 0;
+  let unpaired = 0;
 
-  for (const t of tokens) {
-    // ВСЕГДА отслеживаем таймкоды (даже у пропускаемых токенов)
-    if (t.start_ms != null) lastStartMs = t.start_ms;
-    if (t.end_ms != null) lastEndMs = t.end_ms;
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
 
-    // Пропускаем казахские оригиналы (их перевод идёт следующим токеном)
+    // === Казахский оригинал → спариваем с переводом ===
     if (t.translation_status === 'original' && t.language === 'kk') {
+      const next = tokens[i + 1];
+      if (next && next.translation_status === 'translation') {
+        // ТАЙМКОД от оригинала + ТЕКСТ от перевода
+        result.push({
+          text: next.text,
+          start_ms: t.start_ms,
+          end_ms: t.end_ms,
+          language: 'ru',
+          translation_status: 'paired'
+        });
+        i++; // Пропускаем перевод — уже обработали
+        paired++;
+      }
+      // Если нет перевода — пропускаем казахский оригинал
       continue;
     }
 
-    // Всё остальное оставляем, ГАРАНТИРУЕМ start_ms у каждого токена
-    result.push({
-      ...t,
-      start_ms: t.start_ms != null ? t.start_ms : lastStartMs,
-      end_ms: t.end_ms != null ? t.end_ms : lastEndMs
-    });
+    // === Русский оригинал (без перевода) → берём как есть ===
+    if (t.translation_status === 'original' && t.language === 'ru') {
+      result.push(t);
+      ruOriginals++;
+      continue;
+    }
+
+    // === Перевод без предшествующего оригинала (не должно быть, но на всякий случай) ===
+    if (t.translation_status === 'translation') {
+      // Этот перевод не был спарен — значит оригинал не был казахским
+      // Используем carry-forward таймкод
+      const prev = result[result.length - 1];
+      result.push({
+        ...t,
+        start_ms: t.start_ms != null ? t.start_ms : (prev ? prev.end_ms : 0),
+        end_ms: t.end_ms != null ? t.end_ms : (prev ? prev.end_ms : 0)
+      });
+      unpaired++;
+      continue;
+    }
+
+    // === Токен без translation_status → берём как есть ===
+    if (t.start_ms != null) {
+      result.push(t);
+    }
   }
 
-  logger.info(`filterSonioxTokens: ${tokens.length} → ${result.length} токенов`);
+  logger.info(`filterSonioxTokens: ${tokens.length} → ${result.length} токенов`, {
+    paired, ruOriginals, unpaired
+  });
   return result;
 }
 
@@ -726,28 +761,28 @@ function filterSonioxTokens(tokens) {
  * @returns {Array} диалог [{role, text}]
  */
 function interleaveChannelTokens(managerTokens, clientTokens) {
-  // Логируем сырые токены для диагностики
-  if (managerTokens.length > 0) {
-    logger.info('Сырой токен администратора (первый):', JSON.stringify(managerTokens[0]));
-  }
-  if (clientTokens.length > 0) {
-    logger.info('Сырой токен пациента (первый):', JSON.stringify(clientTokens[0]));
-  }
-
-  // Фильтруем: переводы получают таймкоды от оригиналов, добавляем роль
+  // Фильтруем: спариваем оригиналы с переводами, берём таймкоды от оригиналов
   const mFiltered = filterSonioxTokens(managerTokens).map(t => ({ ...t, role: 'manager' }));
   const cFiltered = filterSonioxTokens(clientTokens).map(t => ({ ...t, role: 'client' }));
 
-  // Логируем отфильтрованные токены
+  // Диагностика: первые 5 токенов каждого канала (текст + таймкод)
+  const logSample = (tokens, label) => {
+    const sample = tokens.slice(0, 5).map(t => `[${t.start_ms}ms] "${t.text}"`);
+    logger.info(`${label} (первые 5):`, sample.join(', '));
+  };
+  if (mFiltered.length > 0) logSample(mFiltered, 'Админ токены');
+  if (cFiltered.length > 0) logSample(cFiltered, 'Клиент токены');
+
+  // Диагностика: диапазон таймкодов каждого канала
   if (mFiltered.length > 0) {
-    logger.info('Отфильтрованный токен администратора (первый):', JSON.stringify({
-      text: mFiltered[0].text, start_ms: mFiltered[0].start_ms, role: mFiltered[0].role
-    }));
+    const mMin = mFiltered[0].start_ms;
+    const mMax = mFiltered[mFiltered.length - 1].start_ms;
+    logger.info(`Админ таймкоды: ${mMin}ms → ${mMax}ms (${mFiltered.length} токенов)`);
   }
   if (cFiltered.length > 0) {
-    logger.info('Отфильтрованный токен пациента (первый):', JSON.stringify({
-      text: cFiltered[0].text, start_ms: cFiltered[0].start_ms, role: cFiltered[0].role
-    }));
+    const cMin = cFiltered[0].start_ms;
+    const cMax = cFiltered[cFiltered.length - 1].start_ms;
+    logger.info(`Клиент таймкоды: ${cMin}ms → ${cMax}ms (${cFiltered.length} токенов)`);
   }
 
   // Объединяем ВСЕ токены и сортируем по времени
@@ -946,153 +981,19 @@ function groupMonoTokensIntoDialog(tokens, callDirection) {
 async function polishTranslation(dialog) {
   if (!dialog || dialog.length === 0) return dialog;
 
-  // Определяем режим: реконструкция диалога (≤4 реплик = "2 блока") или полировка (много реплик)
-  const needsReconstruction = dialog.length <= 4;
-
-  if (needsReconstruction) {
-    // ==================== РЕЖИМ РЕКОНСТРУКЦИИ ====================
-    // Интерливинг не сработал — получили 2 блока текста вместо диалога.
-    // GPT-4o восстанавливает реальный порядок реплик из двух блоков.
-    return await reconstructDialog(dialog);
-  } else {
-    // ==================== РЕЖИМ ПОЛИРОВКИ ====================
-    // Интерливинг сработал — много коротких реплик. Просто полируем перевод.
-    return await polishExistingDialog(dialog);
+  // GPT-4o ТОЛЬКО полирует перевод — НЕ меняет структуру диалога.
+  // Структура (роли, порядок реплик) определяется ТОЛЬКО по таймкодам аудио.
+  if (dialog.length <= 4) {
+    logger.warn(`polishTranslation: всего ${dialog.length} реплик — возможно интерливинг не сработал. Проверь таймкоды.`);
   }
+
+  return await polishExistingDialog(dialog);
 }
 
 /**
- * Реконструкция диалога из 2 блоков текста (admin + client).
- * GPT-4o разбивает 2 блока на чередующиеся реплики по контексту.
- */
-async function reconstructDialog(dialog) {
-  const dialogText = dialog.map(r => {
-    const role = r.role === 'manager' ? 'АДМИНИСТРАТОР' : 'ПАЦИЕНТ';
-    return `${role}:\n${r.text}`;
-  }).join('\n\n');
-
-  const systemPrompt = `Ты — редактор переводов медицинской клиники Мирамед (Актобе, Казахстан).
-
-Тебе даны ДВА БЛОКА текста: весь текст АДМИНИСТРАТОРА и весь текст ПАЦИЕНТА из телефонного разговора.
-Каждый блок — сплошной текст, НЕ разбитый по репликам. Текст — машинный перевод с казахского.
-
-ТВОЯ ЗАДАЧА:
-1. Разбить каждый блок на отдельные реплики (фразы)
-2. Расставить реплики в правильном хронологическом порядке диалога
-3. Исправить перевод — сделать естественный русский язык
-
-КРИТИЧЕСКОЕ ПРАВИЛО — РОЛИ:
-- Текст из блока АДМИНИСТРАТОР → ТОЛЬКО реплики с role "manager"
-- Текст из блока ПАЦИЕНТ → ТОЛЬКО реплики с role "client"
-- НИКОГДА не переносить текст из одного блока в роль другого!
-- Если не уверен кто говорит — смотри из какого блока пришёл текст
-
-ПРАВИЛА РАЗБИЕНИЯ НА РЕПЛИКИ:
-- Каждый вопрос — отдельная реплика
-- Каждый ответ — отдельная реплика
-- Короткие подтверждения ("Ага", "Да", "Хорошо", "Понятно") — отдельные реплики
-- Логически завершённая мысль = одна реплика
-- НЕ объединяй разные вопросы в одну реплику
-
-ПРАВИЛА ЧЕРЕДОВАНИЯ:
-- Обычно разговор начинает администратор (приветствие)
-- Паттерн: админ спрашивает → пациент отвечает → админ → пациент → ...
-- Пациент может говорить несколько реплик подряд (рассказывает о проблеме)
-- Админ может говорить несколько реплик подряд (объясняет процедуру)
-- Конец: запись на приём, уточнение данных, прощание
-
-ПРАВИЛА ПЕРЕВОДА (казахский → естественный русский):
-- "быстрый целитель" / "тез емші" → "костоправ"
-- "недостаточность закончилась" / "жетіспеушілік біткен" → "жидкости не осталось" или "смазка закончилась"
-- "снизить переход" → "уменьшить боль"
-- "сняли ноги" → "сделали снимок ног"
-- "суставная жидкость" / "буын сұйықтығы" → "суставная жидкость" (оставить)
-- "сустав жеген" / "сустав съеден" → "сустав изношен"
-- "сіңір" → "сухожилие"
-- "тізе" → "колено"
-- "бел" → "поясница"
-- "мойын" → "шея"
-- Имена: исправляй искажения распознавания (Сатлев → Тлеп, и т.п.)
-- Медицинские термины: артроз, PRP-терапия, плазмотерапия, УЗИ, МРТ
-- Стоимость приёма: 9900 тенге (экспертная диагностика)
-- Разговорный стиль — это телефонный разговор, не официальный документ
-
-ФОРМАТ ОТВЕТА — строго JSON массив:
-[
-  {"role": "manager", "text": "Алло, здравствуйте! Клиника Мирамед, меня зовут..."},
-  {"role": "client", "text": "Здравствуйте, я хотел бы записаться на приём"},
-  {"role": "manager", "text": "Расскажите, что вас беспокоит?"},
-  {"role": "client", "text": "У меня болят колени"},
-  {"role": "manager", "text": "Как давно это беспокоит?"},
-  {"role": "client", "text": "Уже полгода примерно"},
-  ...
-]
-
-Верни от 15 до 50 чередующихся реплик. Только JSON, ничего больше.`;
-
-  const userPrompt = `Восстанови диалог из этих двух блоков:\n\n${dialogText}`;
-
-  try {
-    logger.info(`GPT-4o: РЕКОНСТРУКЦИЯ диалога (${dialog.length} блоков → чередующиеся реплики)...`);
-
-    const response = await callWithRetry(
-      () => axios.post(GOOGLE_PROXY_URL, {
-        type: 'chat',
-        apiKey: OPENAI_API_KEY,
-        model: 'gpt-4o',
-        max_tokens: 8000,
-        temperature: 0.3,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userPrompt }
-        ]
-      }, { timeout: 180000 }),
-      2,
-      'reconstructDialog'
-    );
-
-    if (!response?.data?.choices?.length) {
-      logger.warn('GPT-4o reconstruct: пустой ответ');
-      return dialog;
-    }
-
-    const content = response.data.choices[0].message?.content;
-    if (!content) {
-      logger.warn('GPT-4o reconstruct: нет контента');
-      return dialog;
-    }
-
-    const jsonMatch = content.match(/\[[\s\S]*\]/);
-    if (!jsonMatch) {
-      logger.warn('GPT-4o reconstruct: не найден JSON', { preview: content.substring(0, 200) });
-      return dialog;
-    }
-
-    const reconstructed = JSON.parse(jsonMatch[0]);
-
-    if (!Array.isArray(reconstructed) || reconstructed.length < 5) {
-      logger.warn(`GPT-4o reconstruct: слишком мало реплик (${reconstructed.length})`);
-      return dialog;
-    }
-
-    // Валидируем роли
-    const result = reconstructed.map(r => ({
-      role: r.role === 'manager' || r.role === 'client' ? r.role : 'manager',
-      text: (r.text || '').trim()
-    })).filter(r => r.text.length > 0);
-
-    logger.info(`GPT-4o reconstruct: ${dialog.length} блоков → ${result.length} реплик`);
-    return result;
-
-  } catch (error) {
-    logger.warn('GPT-4o reconstruct: ошибка', { error: error.message });
-    return dialog;
-  }
-}
-
-/**
- * Полировка уже разбитого диалога (много коротких реплик).
- * GPT-4o только улучшает качество перевода, не меняя структуру.
+ * Полировка перевода диалога (любое количество реплик).
+ * GPT-4o ТОЛЬКО улучшает качество перевода, НЕ меняет структуру.
+ * Структура диалога (роли, порядок) определяется ТОЛЬКО по таймкодам аудио.
  */
 async function polishExistingDialog(dialog) {
   const dialogText = dialog.map((r, i) => {
@@ -1103,19 +1004,29 @@ async function polishExistingDialog(dialog) {
   const systemPrompt = `Ты — редактор переводов медицинской клиники Мирамед (Актобе, Казахстан).
 
 Тебе дан ЧЕРНОВОЙ МАШИННЫЙ перевод телефонного разговора с казахского на русский.
-Диалог уже разбит по репликам — НЕ меняй структуру, только отредактируй текст.
+Диалог уже разбит по репликам и ролям на основе ТАЙМКОДОВ аудио.
+
+ТВОЯ ЗАДАЧА — ТОЛЬКО улучшить перевод. НЕ меняй структуру диалога.
 
 ПРАВИЛА:
-1. Сохрани ТОЧНО ${dialog.length} реплик и те же роли
-2. НЕ добавляй и НЕ удаляй реплики, НЕ меняй порядок
-3. Исправляй буквализмы казахского:
-   - "быстрый целитель" → "костоправ"
-   - "недостаточность закончилась" → "жидкости не осталось"
-   - "снизить переход" → "уменьшить боль"
-   - "сняли ноги" → "сделали снимок ног"
-   - "сустав съеден" → "сустав изношен"
-4. Исправляй имена (искажённые распознаванием), медицинские термины
-5. Сохраняй разговорный стиль — это телефонный разговор
+1. Сохрани ТОЧНО ${dialog.length} реплик
+2. Сохрани ТОЧНО те же роли (manager/client) в том же порядке
+3. НЕ добавляй, НЕ удаляй, НЕ переставляй реплики
+4. НЕ меняй роли — они определены по аудио-каналам, а не по содержанию
+
+СЛОВАРЬ БУКВАЛИЗМОВ (казахский → естественный русский):
+- "быстрый целитель" / "тез емші" → "костоправ"
+- "недостаточность закончилась" → "жидкости/смазки не осталось"
+- "снизить переход" → "уменьшить боль"
+- "сняли ноги" → "сделали снимок ног" / "сделали рентген"
+- "сустав съеден" → "сустав изношен"
+- "нет недостаточности" → "нет жидкости" / "жидкости нет"
+- "в пути не могу ходить" → "долго ходить не могу"
+- "стою на одном месте" → "долго стою"
+- Имена: исправляй искажения распознавания (Сатлев → Тлеп, Нурханат → Нурхат и т.п.)
+- Медицинские: артроз, PRP-терапия, плазмотерапия, УЗИ, МРТ, рентген
+- Клиника: 9900 тенге, экспертная диагностика, Мирамед
+- Стиль: разговорный, телефонный звонок
 
 ФОРМАТ — строго JSON массив, ровно ${dialog.length} элементов:
 [{"role": "manager", "text": "..."}, {"role": "client", "text": "..."}, ...]`;
@@ -1131,7 +1042,7 @@ async function polishExistingDialog(dialog) {
         apiKey: OPENAI_API_KEY,
         model: 'gpt-4o',
         max_tokens: 8000,
-        temperature: 0.3,
+        temperature: 0.1,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
