@@ -861,11 +861,128 @@ function groupMonoTokensIntoDialog(tokens, callDirection) {
 }
 
 // ====================================================================
-//  ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ v6.0 (Soniox)
+//  ПОСТ-ОБРАБОТКА ПЕРЕВОДА (GPT-4o)
+//
+//  Soniox даёт черновой машинный перевод каз→рус.
+//  GPT-4o полирует: делает естественный русский, исправляет имена,
+//  убирает буквализмы. Дешевле чем полный перевод — только редактура.
+// ====================================================================
+
+/**
+ * Полировка чернового перевода Soniox через GPT-4o
+ *
+ * Soniox переводит казахский на русский слишком буквально.
+ * GPT-4o исправляет: имена, медицинские термины, разговорные обороты.
+ *
+ * @param {Array} dialog - [{role: 'manager'|'client', text: '...'}, ...]
+ * @returns {Array} отполированный диалог с тем же количеством реплик
+ */
+async function polishTranslation(dialog) {
+  if (!dialog || dialog.length === 0) return dialog;
+
+  // Формируем текст диалога для GPT-4o
+  const dialogText = dialog.map((r, i) => {
+    const role = r.role === 'manager' ? 'Администратор' : 'Пациент';
+    return `[${i + 1}] ${role}: ${r.text}`;
+  }).join('\n');
+
+  const systemPrompt = `Ты — редактор переводов медицинской клиники в Актобе, Казахстан (клиника Мирамед).
+
+Тебе дан ЧЕРНОВОЙ МАШИННЫЙ перевод телефонного разговора с казахского на русский.
+Машинный перевод часто буквальный, неестественный, искажает имена и медицинские термины.
+
+ТВОЯ ЗАДАЧА: Отредактировать каждую реплику, чтобы она звучала как естественная русская речь.
+
+ПРАВИЛА:
+1. Сохрани ТОЧНО такое же количество реплик (${dialog.length} штук) и те же роли
+2. НЕ добавляй и НЕ удаляй реплики, НЕ меняй порядок
+3. Исправляй буквализмы казахского на нормальный русский:
+   - "снизить переход" → "уменьшить боль"
+   - "сняли ноги" → "сделали снимок ног"
+   - "недостаточность закончилась" → "жидкости не осталось"
+   - "быстрый целитель" → "костоправ/целитель"
+4. Исправляй искажённые казахские имена (Сатлев → Тлеп, Нурханат → Нурхат и т.д.)
+5. Медицинские термины: артроз, PRP-терапия, плазмотерапия, УЗИ, тромбоциты
+6. НЕ добавляй то, чего нет в оригинале — только редактируй существующий текст
+7. Сохраняй разговорный стиль — это телефонный разговор, не литературный текст
+
+ФОРМАТ ОТВЕТА — строго JSON массив:
+[
+  {"role": "manager", "text": "отредактированный текст"},
+  {"role": "client", "text": "отредактированный текст"}
+]
+
+Ровно ${dialog.length} элементов, JSON и ничего больше.`;
+
+  const userPrompt = `Отредактируй этот черновой перевод (${dialog.length} реплик):\n\n${dialogText}`;
+
+  try {
+    logger.info(`GPT-4o: полировка перевода (${dialog.length} реплик, ${dialogText.length} символов)...`);
+
+    const response = await callWithRetry(
+      () => axios.post(GOOGLE_PROXY_URL, {
+        type: 'chat',
+        apiKey: OPENAI_API_KEY,
+        model: 'gpt-4o',
+        max_tokens: 4000,
+        temperature: 0.3,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      }, { timeout: 120000 }),
+      2,
+      'polishTranslation'
+    );
+
+    if (!response?.data?.choices?.length) {
+      logger.warn('GPT-4o polish: пустой ответ, возвращаем оригинал');
+      return dialog;
+    }
+
+    const content = response.data.choices[0].message?.content;
+    if (!content) {
+      logger.warn('GPT-4o polish: нет контента, возвращаем оригинал');
+      return dialog;
+    }
+
+    // Извлекаем JSON массив из ответа
+    const jsonMatch = content.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      logger.warn('GPT-4o polish: не найден JSON массив', { contentPreview: content.substring(0, 200) });
+      return dialog;
+    }
+
+    const polished = JSON.parse(jsonMatch[0]);
+
+    // Проверяем что количество реплик совпадает
+    if (!Array.isArray(polished) || polished.length !== dialog.length) {
+      logger.warn(`GPT-4o polish: количество реплик не совпадает (${polished.length} vs ${dialog.length}), возвращаем оригинал`);
+      return dialog;
+    }
+
+    // Восстанавливаем роли из оригинала (на случай если GPT их изменил)
+    const result = polished.map((p, i) => ({
+      role: dialog[i].role,
+      text: (p.text || dialog[i].text).trim()
+    }));
+
+    logger.info(`GPT-4o polish: готово (${result.length} реплик)`);
+    return result;
+
+  } catch (error) {
+    // Если GPT-4o не ответил — возвращаем оригинальный перевод Soniox
+    logger.warn('GPT-4o polish: ошибка, возвращаем оригинал Soniox', { error: error.message });
+    return dialog;
+  }
+}
+
+// ====================================================================
+//  ГЛАВНАЯ ФУНКЦИЯ ТРАНСКРИБАЦИИ v6.0 (Soniox + GPT-4o polish)
 //
 //  Pipeline:
-//    СТЕРЕО: ffmpeg split → Soniox ×2 (транскрибация+перевод) → merge → диалог
-//    МОНО: Soniox (транскрибация+перевод+диаризация) → диалог
+//    СТЕРЕО: ffmpeg split → Soniox ×2 (транскрибация+перевод) → merge → GPT-4o polish → диалог
+//    МОНО: Soniox (транскрибация+перевод+диаризация) → GPT-4o polish → диалог
 //
 //  Вывод: formatted = [{role: 'manager', text: 'реплика'}, {role: 'client', text: 'реплика'}, ...]
 //  Чередующиеся реплики с ролями (настоящий диалог!)
@@ -897,11 +1014,14 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
           ]);
 
           // Интерливим токены по таймкодам → чередующийся диалог
-          const formatted = interleaveChannelTokens(managerTokens, clientTokens);
+          const rawDialog = interleaveChannelTokens(managerTokens, clientTokens);
 
-          if (formatted.length === 0) {
+          if (rawDialog.length === 0) {
             return { plain: '', formatted: [] };
           }
+
+          // GPT-4o полирует черновой перевод Soniox → естественный русский
+          const formatted = await polishTranslation(rawDialog);
 
           const plain = formatted.map(r => r.text).join(' ');
           logger.info(`Стерео pipeline v6.0 done: ${formatted.length} реплик`);
@@ -919,11 +1039,14 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
     const monoTokens = await transcribeMonoWithSoniox(audioBuffer);
 
     // Группируем по speaker + паузы → чередующийся диалог
-    const formatted = groupMonoTokensIntoDialog(monoTokens, callDirection);
+    const rawDialog = groupMonoTokensIntoDialog(monoTokens, callDirection);
 
-    if (formatted.length === 0) {
+    if (rawDialog.length === 0) {
       return { plain: '', formatted: [] };
     }
+
+    // GPT-4o полирует черновой перевод Soniox → естественный русский
+    const formatted = await polishTranslation(rawDialog);
 
     const plain = formatted.map(r => r.text).join(' ');
     logger.info(`Моно pipeline v6.0 done: ${formatted.length} реплик`);
