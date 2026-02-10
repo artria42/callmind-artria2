@@ -658,80 +658,69 @@ async function sonioxDeleteFile(fileId) {
 // ====================================================================
 
 /**
- * Группировка токенов одного канала в реплики по паузам
+ * Фильтрация токенов Soniox: убираем оригиналы казахского (они дублируются переводом)
+ * Оставляем: переведённые токены + русские оригиналы
  *
- * Если между токенами пауза > порога — это разные реплики.
- * Фильтрует: берёт переведённые + русские оригиналы, пропускает казахские оригиналы.
- *
- * @param {Array} tokens - токены от Soniox [{text, start_ms, end_ms, language, translation_status}]
- * @param {string} role - 'manager' или 'client'
- * @param {number} pauseThresholdMs - порог паузы в мс (по умолчанию 1500)
- * @returns {Array} реплики [{role, text, start_ms, end_ms}]
+ * @param {Array} tokens - сырые токены от Soniox
+ * @returns {Array} отфильтрованные токены
  */
-function groupTokensIntoReplicas(tokens, role, pauseThresholdMs = 1500) {
+function filterSonioxTokens(tokens) {
   if (!tokens || tokens.length === 0) return [];
-
-  // Берём только переведённые токены или русские оригиналы
-  // Пропускаем оригиналы казахского (они дублируются переводом)
-  const filtered = tokens.filter(t => {
+  return tokens.filter(t => {
     if (t.language === 'kk' && t.translation_status === 'original') return false;
     return true;
   });
+}
 
-  if (filtered.length === 0) return [];
+/**
+ * Интерливинг токенов двух каналов в чередующийся диалог
+ *
+ * Берём токены из обоих каналов, сортируем по start_ms,
+ * группируем по последовательным блокам одного спикера.
+ * Результат: чередующиеся реплики — кто что сказал и когда.
+ *
+ * @param {Array} managerTokens - токены канала администратора
+ * @param {Array} clientTokens - токены канала пациента
+ * @returns {Array} диалог [{role, text}]
+ */
+function interleaveChannelTokens(managerTokens, clientTokens) {
+  // Фильтруем казахские оригиналы и добавляем роль
+  const mFiltered = filterSonioxTokens(managerTokens).map(t => ({ ...t, role: 'manager' }));
+  const cFiltered = filterSonioxTokens(clientTokens).map(t => ({ ...t, role: 'client' }));
 
-  const replicas = [];
-  let currentWords = [filtered[0].text];
-  let currentStartMs = filtered[0].start_ms;
-  let currentEndMs = filtered[0].end_ms;
+  // Объединяем ВСЕ токены и сортируем по времени
+  const allTokens = [...mFiltered, ...cFiltered].sort((a, b) => a.start_ms - b.start_ms);
 
-  for (let i = 1; i < filtered.length; i++) {
-    const prevEnd = filtered[i - 1].end_ms;
-    const currStart = filtered[i].start_ms;
-    const pause = currStart - prevEnd;
+  if (allTokens.length === 0) return [];
 
-    if (pause > pauseThresholdMs) {
-      // Пауза — сохраняем реплику и начинаем новую
+  // Группируем последовательные токены одного спикера в реплики
+  const dialog = [];
+  let currentRole = allTokens[0].role;
+  let currentWords = [allTokens[0].text];
+
+  for (let i = 1; i < allTokens.length; i++) {
+    if (allTokens[i].role !== currentRole) {
+      // Спикер сменился — сохраняем реплику
       const text = currentWords.join('').trim();
       if (text) {
-        replicas.push({ role, text, start_ms: currentStartMs, end_ms: currentEndMs });
+        dialog.push({ role: currentRole, text });
       }
-      currentWords = [filtered[i].text];
-      currentStartMs = filtered[i].start_ms;
+      currentRole = allTokens[i].role;
+      currentWords = [allTokens[i].text];
     } else {
-      currentWords.push(filtered[i].text);
+      currentWords.push(allTokens[i].text);
     }
-    currentEndMs = filtered[i].end_ms;
   }
 
   // Последняя реплика
   const lastText = currentWords.join('').trim();
   if (lastText) {
-    replicas.push({ role, text: lastText, start_ms: currentStartMs, end_ms: currentEndMs });
+    dialog.push({ role: currentRole, text: lastText });
   }
 
-  logger.info(`Сгруппировано ${filtered.length} токенов → ${replicas.length} реплик [${role}]`);
-  return replicas;
-}
-
-/**
- * Merge реплик из двух каналов в чередующийся диалог по таймкодам
- *
- * @param {Array} managerReplicas - реплики менеджера [{role, text, start_ms, end_ms}]
- * @param {Array} clientReplicas - реплики клиента [{role, text, start_ms, end_ms}]
- * @returns {Array} диалог [{role, text}]
- */
-function mergeChannelReplicas(managerReplicas, clientReplicas) {
-  // Объединяем и сортируем по start_ms
-  const all = [...managerReplicas, ...clientReplicas];
-  all.sort((a, b) => a.start_ms - b.start_ms);
-
-  // Убираем start_ms/end_ms — фронтенд ожидает [{role, text}]
-  const dialog = all.map(r => ({ role: r.role, text: r.text }));
-
-  logger.info(`Merge диалог: ${dialog.length} реплик`, {
-    manager: managerReplicas.length,
-    client: clientReplicas.length
+  logger.info(`Интерливинг: ${allTokens.length} токенов → ${dialog.length} реплик`, {
+    manager: mFiltered.length,
+    client: cFiltered.length
   });
 
   return dialog;
@@ -812,10 +801,7 @@ function groupMonoTokensIntoDialog(tokens, callDirection) {
   if (!tokens || tokens.length === 0) return [];
 
   // Фильтруем: только переведённые + русские оригиналы
-  const filtered = tokens.filter(t => {
-    if (t.language === 'kk' && t.translation_status === 'original') return false;
-    return true;
-  });
+  const filtered = filterSonioxTokens(tokens);
 
   if (filtered.length === 0) return [];
 
@@ -910,12 +896,8 @@ async function transcribeAudio(audioUrl, callDirection = 'incoming') {
             transcribeChannelWithSoniox(channels.client, 'пациент')
           ]);
 
-          // Группируем токены в реплики по паузам
-          const managerReplicas = groupTokensIntoReplicas(managerTokens, 'manager');
-          const clientReplicas = groupTokensIntoReplicas(clientTokens, 'client');
-
-          // Merge в чередующийся диалог по таймкодам
-          const formatted = mergeChannelReplicas(managerReplicas, clientReplicas);
+          // Интерливим токены по таймкодам → чередующийся диалог
+          const formatted = interleaveChannelTokens(managerTokens, clientTokens);
 
           if (formatted.length === 0) {
             return { plain: '', formatted: [] };
