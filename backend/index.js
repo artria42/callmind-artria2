@@ -627,6 +627,21 @@ async function sonioxGetTranscript(transcriptionId) {
   );
 
   const tokens = response.data.tokens || [];
+
+  // Диагностика: логируем первые 3 токена чтобы видеть структуру
+  if (tokens.length > 0) {
+    const sample = tokens.slice(0, 3).map(t => ({
+      text: t.text,
+      start_ms: t.start_ms,
+      end_ms: t.end_ms,
+      language: t.language,
+      translation_status: t.translation_status,
+      speaker: t.speaker,
+      confidence: t.confidence
+    }));
+    logger.info(`Soniox токены (первые 3):`, JSON.stringify(sample));
+  }
+
   logger.info(`Soniox транскрипт: ${tokens.length} токенов`, { transcriptionId });
   return tokens;
 }
@@ -658,18 +673,52 @@ async function sonioxDeleteFile(fileId) {
 // ====================================================================
 
 /**
- * Фильтрация токенов Soniox: убираем оригиналы казахского (они дублируются переводом)
- * Оставляем: переведённые токены + русские оригиналы
+ * Фильтрация токенов Soniox: оставляем переводы + русские оригиналы.
+ *
+ * ВАЖНО: Переведённые токены (translation_status === 'translation') НЕ имеют start_ms/end_ms!
+ * Таймкоды есть только у оригинальных токенов. Поэтому мы переносим start_ms/end_ms
+ * с оригинала на его перевод (перевод всегда идёт сразу после оригинала).
  *
  * @param {Array} tokens - сырые токены от Soniox
- * @returns {Array} отфильтрованные токены
+ * @returns {Array} отфильтрованные токены с таймкодами
  */
 function filterSonioxTokens(tokens) {
   if (!tokens || tokens.length === 0) return [];
-  return tokens.filter(t => {
-    if (t.language === 'kk' && t.translation_status === 'original') return false;
-    return true;
-  });
+
+  const result = [];
+  let lastOriginalStartMs = 0;
+  let lastOriginalEndMs = 0;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+
+    if (t.translation_status === 'original') {
+      // Оригинальный токен — запоминаем его таймкоды
+      if (t.start_ms !== undefined) lastOriginalStartMs = t.start_ms;
+      if (t.end_ms !== undefined) lastOriginalEndMs = t.end_ms;
+
+      // Русский оригинал оставляем (у него уже есть таймкоды)
+      if (t.language === 'ru') {
+        result.push(t);
+      }
+      // Казахский оригинал пропускаем — его перевод придёт следующим токеном
+    } else if (t.translation_status === 'translation') {
+      // Переведённый токен — переносим таймкоды с предыдущего оригинала
+      result.push({
+        ...t,
+        start_ms: t.start_ms !== undefined ? t.start_ms : lastOriginalStartMs,
+        end_ms: t.end_ms !== undefined ? t.end_ms : lastOriginalEndMs
+      });
+    } else {
+      // translation_status === 'none' или отсутствует — обычный токен, оставляем
+      if (t.start_ms !== undefined) lastOriginalStartMs = t.start_ms;
+      if (t.end_ms !== undefined) lastOriginalEndMs = t.end_ms;
+      result.push(t);
+    }
+  }
+
+  logger.info(`filterSonioxTokens: ${tokens.length} → ${result.length} токенов`);
+  return result;
 }
 
 /**
@@ -684,12 +733,36 @@ function filterSonioxTokens(tokens) {
  * @returns {Array} диалог [{role, text}]
  */
 function interleaveChannelTokens(managerTokens, clientTokens) {
-  // Фильтруем казахские оригиналы и добавляем роль
+  // Логируем сырые токены для диагностики
+  if (managerTokens.length > 0) {
+    logger.info('Сырой токен администратора (первый):', JSON.stringify(managerTokens[0]));
+  }
+  if (clientTokens.length > 0) {
+    logger.info('Сырой токен пациента (первый):', JSON.stringify(clientTokens[0]));
+  }
+
+  // Фильтруем: переводы получают таймкоды от оригиналов, добавляем роль
   const mFiltered = filterSonioxTokens(managerTokens).map(t => ({ ...t, role: 'manager' }));
   const cFiltered = filterSonioxTokens(clientTokens).map(t => ({ ...t, role: 'client' }));
 
+  // Логируем отфильтрованные токены
+  if (mFiltered.length > 0) {
+    logger.info('Отфильтрованный токен администратора (первый):', JSON.stringify({
+      text: mFiltered[0].text, start_ms: mFiltered[0].start_ms, role: mFiltered[0].role
+    }));
+  }
+  if (cFiltered.length > 0) {
+    logger.info('Отфильтрованный токен пациента (первый):', JSON.stringify({
+      text: cFiltered[0].text, start_ms: cFiltered[0].start_ms, role: cFiltered[0].role
+    }));
+  }
+
   // Объединяем ВСЕ токены и сортируем по времени
-  const allTokens = [...mFiltered, ...cFiltered].sort((a, b) => a.start_ms - b.start_ms);
+  const allTokens = [...mFiltered, ...cFiltered].sort((a, b) => {
+    const aMs = a.start_ms || 0;
+    const bMs = b.start_ms || 0;
+    return aMs - bMs;
+  });
 
   if (allTokens.length === 0) return [];
 
